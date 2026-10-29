@@ -1,0 +1,69 @@
+{
+  "entities": {
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Authenticated Katalog Yap user account profile, phone/password hash, and Firebase password reset metadata.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID (matches document ID)."
+        },
+        "phone": {
+          "type": "string",
+          "description": "Normalized phone number (e.g. +90 5321234567)."
+        },
+        "email": {
+          "type": "string",
+          "description": "Account or recovery email used for Google Sign-In and Firebase password reset."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name or business contact name."
+        },
+        "provider": {
+          "type": "string",
+          "enum": ["phone_password", "google"],
+          "description": "Authentication provider type."
+        },
+        "passwordHash": {
+          "type": "string",
+          "description": "SHA-256 hash of user password for phone+password login."
+        },
+        "passwordResetRequestedAt": {
+          "type": "integer",
+          "description": "Epoch milliseconds of the last password reset action."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when account record was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when account record was last updated."
+        }
+      },
+      "required": [
+        "userId",
+        "phone",
+        "email",
+        "displayName",
+        "provider",
+        "passwordHash",
+        "passwordResetRequestedAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserAccount"
+      },
+      "description": "Per-user account document owned strictly by request.auth.uid == userId."
+    }
+  }
+}

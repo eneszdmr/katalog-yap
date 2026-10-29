@@ -1,0 +1,14 @@
+<resources>
+    <string name="app_name">Katalog Yap</string>
+    <string name="tab_catalogs">Kataloglar</string>
+    <string name="tab_orders">Siparişler</string>
+    <string name="tab_analytics">Analitik</string>
+    <string name="tab_settings">Ayarlar</string>
+    <string name="cd_back_button">Geri dön</string>
+    <string name="cd_close_button">Kapat</string>
+    <string name="cd_clear_input">Temizle</string>
+    <string name="shortcut_catalogs_short">Kataloglar</string>
+    <string name="shortcut_catalogs_long">Kataloglarımı Aç ve Paylaş</string>
+    <string name="shortcut_orders_short">Siparişler</string>
+    <string name="shortcut_orders_long">Gelen Siparişleri Yönet</string>
+</resources>

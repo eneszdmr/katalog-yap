@@ -1,0 +1,49 @@
+{
+  "name": "Katalog Yap — Dijital Ürün Kataloğu & Sipariş Yönetimi",
+  "short_name": "Katalog Yap",
+  "description": "Dakikalar içinde profesyonel dijital ürün kataloğu oluşturun, WhatsApp ve PDF ile paylaşın, sipariş ve stoklarınızı yönetin.",
+  "start_url": "/?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#F8FAFC",
+  "theme_color": "#2563EB",
+  "lang": "tr-TR",
+  "dir": "ltr",
+  "categories": ["business", "shopping", "productivity"],
+  "icons": [
+    {
+      "src": "/icons/icon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Kataloglarım",
+      "short_name": "Kataloglar",
+      "description": "Kataloglarınızı görüntüleyin ve paylaşın",
+      "url": "/catalogs"
+    },
+    {
+      "name": "Yeni Ürün Ekle",
+      "short_name": "Ürün Ekle",
+      "description": "Kataloğa hızlıca yeni ürün ekleyin",
+      "url": "/products/new"
+    },
+    {
+      "name": "Siparişler",
+      "short_name": "Siparişler",
+      "description": "Gelen müşteri siparişlerini yönetin",
+      "url": "/orders"
+    }
+  ],
+  "offline_enabled": true
+}

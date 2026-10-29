@@ -1,0 +1,6 @@
+{
+  "name": "Katalog Yap",
+  "description": "İşletmelerin telefonlarından dijital ürün kataloğu oluşturup link ile paylaşabildiği, ziyaretçi ve sipariş takibi yapabildiği SaaS uygulaması.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
