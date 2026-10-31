@@ -1,21 +1,31 @@
 # Add project specific ProGuard rules here.
 # You can control the set of applied configuration files using the
 # proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Keep data models used in JSON serialization/deserialization
+-keep class com.example.model.** { *; }
+-keepclassmembers class com.example.model.** { *; }
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Keep MySQL / MariaDB JDBC Driver and Reflection classes
+-keep class com.mysql.jdbc.** { *; }
+-keep class com.mysql.cj.** { *; }
+-keep class org.gjt.mm.mysql.** { *; }
+-dontwarn java.sql.**
+-dontwarn javax.sql.**
+-dontwarn com.mysql.**
+-keep interface java.sql.** { *; }
+-keep interface javax.sql.** { *; }
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Keep Firebase Auth, Firestore, and App Check classes
+-keep class com.google.firebase.** { *; }
+-dontwarn com.google.firebase.**
+
+# Keep Jetpack Credential Manager and Google ID
+-keep class androidx.credentials.** { *; }
+-keep class com.google.android.libraries.identity.googleid.** { *; }
+-dontwarn androidx.credentials.**
+
+# Keep Coroutines and Coil
+-keepclassmembers class kotlinx.coroutines.** { *; }
+-dontwarn coil.**
+

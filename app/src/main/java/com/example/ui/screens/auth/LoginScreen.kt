@@ -145,7 +145,9 @@ fun LoginScreen(
     // Kayıtlı Google hesabı varsa sessiz otomatik kontrol
     LaunchedEffect(Unit) {
         if (!authContext.isAuthenticated) {
-            FirebaseGoogleAuthHelper.attemptAutoSignIn(context)
+            runCatching {
+                FirebaseGoogleAuthHelper.attemptAutoSignIn(context)
+            }
         }
     }
 

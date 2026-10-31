@@ -73,10 +73,14 @@ fun SplashScreen(
     LaunchedEffect(Unit) {
         startAnimation = true
         delay(1500L)
-        when {
-            !authContext.isAuthenticated -> onNavigateToLogin()
-            !authContext.isOnboardingCompleted -> onNavigateToOnboarding()
-            else -> onNavigateToHome()
+        runCatching {
+            when {
+                !authContext.isAuthenticated -> onNavigateToLogin()
+                !authContext.isOnboardingCompleted -> onNavigateToOnboarding()
+                else -> onNavigateToHome()
+            }
+        }.onFailure {
+            onNavigateToLogin()
         }
     }
 

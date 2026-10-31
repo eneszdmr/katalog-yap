@@ -15,11 +15,19 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         // STEP 1: Configure Firebase App Check with launch intent before any UI or Firebase calls
-        configureAppCheck(this, intent)
+        runCatching {
+            configureAppCheck(this, intent)
+        }.onFailure { err ->
+            android.util.Log.e("MainActivity", "App Check initialization bypassed: ${err.message}")
+        }
 
         // STEP 2: Initialize local data layer & offline image cache (Lazy Loading + 50MB Disk Cache)
-        LocalStorageDataService.getInstance(applicationContext)
-        PwaOfflineAndShortcutHelper.configureCachedImageLoader(applicationContext)
+        runCatching {
+            LocalStorageDataService.getInstance(applicationContext)
+            PwaOfflineAndShortcutHelper.configureCachedImageLoader(applicationContext)
+        }.onFailure { err ->
+            android.util.Log.e("MainActivity", "Data service initialization warning: ${err.message}")
+        }
 
         enableEdgeToEdge()
         setContent {
