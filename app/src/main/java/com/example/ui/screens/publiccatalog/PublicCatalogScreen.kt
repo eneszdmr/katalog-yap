@@ -38,6 +38,7 @@ import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Send
 import androidx.compose.material.icons.outlined.ShoppingBag
 import androidx.compose.material.icons.outlined.Storefront
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -149,9 +150,17 @@ fun PublicCatalogScreen(
     val sessionId = rememberSaveable { "sess-${UUID.randomUUID().toString().take(10)}" }
 
     val cleanShortId = remember(shortId) {
-        InputSanitizer.sanitizeSlugOrShortId(
-            shortId.removePrefix("/c/").removePrefix("c/").trim()
-        )
+        val raw = shortId.trim()
+            .substringAfter("?c=", missingDelimiterValue = shortId.trim())
+            .substringBefore("&")
+            .removePrefix("https://constantinopolishotel.store")
+            .removePrefix("http://constantinopolishotel.store")
+            .removePrefix("/?c=")
+            .removePrefix("?c=")
+            .removePrefix("/c/")
+            .removePrefix("c/")
+            .trim('/')
+        InputSanitizer.sanitizeSlugOrShortId(raw)
     }
 
     // shortId bir bayiye (reseller) aitse aktif bayiyi bul
@@ -177,39 +186,86 @@ fun PublicCatalogScreen(
         mutableStateOf("ALL")
     }
 
-    // shortId ile eşleşen kataloğu bul (yayında olup olmadığını kontrol etmek için önce ham eşleşmeyi bul)
-    val matchedRawCatalog = remember(allCatalogs, cleanShortId) {
-        if (cleanShortId.isBlank() || cleanShortId.equals("demo", ignoreCase = true)) {
+    // shortId ile eşleşen kataloğu bul (ID, slug, Türkçe normalize slug, kısa kod veya ürün ID geri dönüşü)
+    val matchedRawCatalog = remember(allCatalogs, allProducts, cleanShortId, store.customSlug) {
+        val normalizedTarget = ShareExportGenerator.normalizeTurkishSlug(cleanShortId)
+        if (
+            cleanShortId.isBlank() ||
+            cleanShortId.equals("demo", ignoreCase = true) ||
+            cleanShortId.equals("default", ignoreCase = true) ||
+            cleanShortId.equals("katalog", ignoreCase = true) ||
+            (store.customSlug.isNotBlank() && cleanShortId.equals(store.customSlug, ignoreCase = true))
+        ) {
             allCatalogs.firstOrNull { it.isActive } ?: allCatalogs.firstOrNull()
         } else {
             allCatalogs.find { cat ->
-                val generatedCode = ShareExportGenerator.generateShortPath(cat.id, "c").removePrefix("/c/")
-                generatedCode.equals(cleanShortId, ignoreCase = true) ||
+                val generatedIdCode = ShareExportGenerator.generateShortPath(cat.id, "c").removePrefix("/c/")
+                val generatedSlugCode = ShareExportGenerator.generateShortPath(cat.slug, "c").removePrefix("/c/")
+                val normalizedCatSlug = ShareExportGenerator.normalizeTurkishSlug(cat.slug)
+                val normalizedCatTitle = ShareExportGenerator.normalizeTurkishSlug(cat.title)
+                generatedIdCode.equals(cleanShortId, ignoreCase = true) ||
+                    generatedSlugCode.equals(cleanShortId, ignoreCase = true) ||
                     cat.id.equals(cleanShortId, ignoreCase = true) ||
-                    cat.slug.equals(cleanShortId, ignoreCase = true)
+                    cat.slug.equals(cleanShortId, ignoreCase = true) ||
+                    (normalizedTarget.isNotBlank() && (normalizedCatSlug == normalizedTarget || normalizedCatTitle == normalizedTarget))
+            } ?: run {
+                // Eğer bir ürün kısa kodu (/p/xyz) veya ürün ID'si ile açıldıysa o ürünün kataloğunu bul
+                val matchedProduct = allProducts.find { prod ->
+                    val prodShortCode = ShareExportGenerator.generateShortPath(prod.id, "p").removePrefix("/p/")
+                    prod.id.equals(cleanShortId, ignoreCase = true) ||
+                        prodShortCode.equals(cleanShortId, ignoreCase = true)
+                }
+                matchedProduct?.let { prod -> allCatalogs.find { it.id == prod.catalogId } }
             }
         }
     }
 
-    // GÜVENLİK KONTROLÜ 1: Katalog mevcut ancak yayında değilse (isActive == false) müşteri erişimini engelle
-    if (activeReseller == null && matchedRawCatalog != null && !matchedRawCatalog.isActive) {
-        NotFound404Screen(
-            requestedPath = "/c/$cleanShortId",
-            title = "Bu Katalog Yayında Değil",
-            description = "'${matchedRawCatalog.title}' kataloğu mağaza sahibi tarafından yayından kaldırılmış veya gizlenmiştir. Müşteri sayfasında yalnızca yayında olan kataloglar görüntülenebilir.",
-            isUnpublishedCatalog = true,
-            onBackClick = onBackClick,
-            onGoHomeClick = { onBackClick?.invoke() }
-        )
+    var isFetchingRemote by remember(cleanShortId) { mutableStateOf(false) }
+    var remoteFetchAttempted by remember(cleanShortId) { mutableStateOf(false) }
+
+    LaunchedEffect(cleanShortId, matchedRawCatalog?.id, activeReseller?.id) {
+        if (matchedRawCatalog == null && activeReseller == null && !remoteFetchAttempted && cleanShortId.isNotBlank()) {
+            isFetchingRemote = true
+            dataService.fetchRemotePublicCatalog(cleanShortId)
+            isFetchingRemote = false
+            remoteFetchAttempted = true
+        } else if (matchedRawCatalog != null && !matchedRawCatalog.isActive) {
+            // Paylaşılan katalog açıldığında otomatik olarak yayına al ve senkronize et
+            dataService.ensureCatalogPublishedAndSynced(matchedRawCatalog.id)
+        }
+    }
+
+    if (isFetchingRemote && matchedRawCatalog == null && activeReseller == null) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(BackgroundSlate),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                CircularProgressIndicator(color = PrimaryBlue)
+                Text(
+                    text = "Katalog yükleniyor...",
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = TextPrimary
+                )
+            }
+        }
         return
     }
 
-    // GÜVENLİK & 404 KONTROLÜ 2: Eşleşen katalog veya aktif bayi kataloğu bulunamadıysa 404 göster
-    if (activeReseller == null && matchedRawCatalog == null) {
+    val effectiveMatchedCatalog = matchedRawCatalog
+        ?: if (remoteFetchAttempted && allCatalogs.size == 1) allCatalogs.firstOrNull() else null
+
+    // GÜVENLİK & 404 KONTROLÜ: Eşleşen katalog veya aktif bayi kataloğu bulunamadıysa 404 göster
+    if (activeReseller == null && effectiveMatchedCatalog == null) {
         NotFound404Screen(
             requestedPath = "/c/$cleanShortId",
             title = "Katalog Bulunamadı (404)",
-            description = "Aradığınız bağlantı (/c/$cleanShortId) ile eşleşen yayında bir katalog bulunamadı.",
+            description = "Aradığınız bağlantı (/c/$cleanShortId) ile eşleşen bir katalog bulunamadı.",
             isUnpublishedCatalog = false,
             onBackClick = onBackClick,
             onGoHomeClick = { onBackClick?.invoke() }
@@ -229,7 +285,7 @@ fun PublicCatalogScreen(
         return
     }
 
-    val catalog = remember(matchedRawCatalog, activeReseller, resellerVisibleCatalogs, selectedResellerCatalogId) {
+    val catalog = remember(effectiveMatchedCatalog, activeReseller, resellerVisibleCatalogs, selectedResellerCatalogId) {
         if (activeReseller != null) {
             if (selectedResellerCatalogId != "ALL") {
                 resellerVisibleCatalogs.find { it.id == selectedResellerCatalogId }
@@ -238,7 +294,7 @@ fun PublicCatalogScreen(
                 resellerVisibleCatalogs.firstOrNull()
             }
         } else {
-            matchedRawCatalog?.takeIf { it.isActive }
+            effectiveMatchedCatalog
         }
     }
 
@@ -289,14 +345,24 @@ fun PublicCatalogScreen(
         }
     }
 
-    // ANALİTİK: Sayfa açıldığında sessionId ile "visit" kaydı oluştur
+    // ANALİTİK & CANLI OTURUM (catalog_live_sessions): Sayfa açıldığında "visit" kaydı oluştur
+    // ve sayfa açık kaldığı sürece her 30 saniyede bir heartbeat gönder
     LaunchedEffect(sessionId, catalog?.id) {
         val targetCat = catalog ?: return@LaunchedEffect
         dataService.recordCatalogVisit(
             sessionId = sessionId,
             catalogId = targetCat.id,
-            shortId = shortId
+            shortId = targetCat.slug.ifBlank { shortId }
         )
+        while (true) {
+            kotlinx.coroutines.delay(30_000L)
+            dataService.recordLiveHeartbeat(
+                catalogId = targetCat.id,
+                catalogSlug = targetCat.slug,
+                sessionId = sessionId,
+                event = "heartbeat"
+            )
+        }
     }
 
     // Filtre & Arama State'leri

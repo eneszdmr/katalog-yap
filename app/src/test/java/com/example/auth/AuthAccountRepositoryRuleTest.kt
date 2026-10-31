@@ -12,7 +12,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [36])
 class AuthAccountRepositoryRuleTest : FirestoreEmulatorTestBase() {
 
     @Test
@@ -65,4 +65,48 @@ class AuthAccountRepositoryRuleTest : FirestoreEmulatorTestBase() {
             assertEquals(FirebaseFirestoreException.Code.PERMISSION_DENIED, e.code)
         }
     }
+
+    @Test
+    fun authenticatedOwnerCanCreateCatalogAndProductAndPublicCanRead() = runTest {
+        val ownerUid = signInAsTestUser("merchant@katalogyap.com")
+        val firebaseRepo = com.example.services.FirebaseRepository(db, auth)
+
+        val catalog = com.example.model.Catalog(
+            id = "cat-test-1",
+            slug = "ilkbahar-koleksiyonu",
+            title = "İlkbahar Koleksiyonu",
+            description = "Yeni sezon kataloğu",
+            coverImageUrl = "https://constantinopolishotel.store/cover.jpg",
+            isActive = true,
+            viewCount = 5
+        )
+        val product = com.example.model.Product(
+            id = "prod-test-1",
+            catalogId = "cat-test-1",
+            name = "İpek Eşarp",
+            sku = "IPK-101",
+            price = 750.0,
+            currency = "₺",
+            category = "Aksesuar",
+            subCategory = "Eşarp",
+            description = "Saf ipek eşarp",
+            imageUrl = "data:image/jpeg;base64,/9j/4AAQSkZJRg==",
+            stockCount = 15,
+            sortOrder = 1
+        )
+
+        firebaseRepo.saveCatalogStrict(catalog)
+        firebaseRepo.saveProductStrict(product)
+
+        val catalogDoc = firebaseRepo.getCatalogDocumentById("cat-test-1")
+        assertNotNull(catalogDoc)
+        assertEquals(ownerUid, catalogDoc?.ownerId)
+        assertEquals("İlkbahar Koleksiyonu", catalogDoc?.toDomainCatalog()?.title)
+
+        val productDoc = firebaseRepo.getProductDocumentById("prod-test-1")
+        assertNotNull(productDoc)
+        assertEquals(ownerUid, productDoc?.ownerId)
+        assertEquals("İpek Eşarp", productDoc?.toDomainProduct()?.name)
+    }
 }
+

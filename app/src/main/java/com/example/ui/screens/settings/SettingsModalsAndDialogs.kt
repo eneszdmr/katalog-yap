@@ -96,6 +96,7 @@ fun EditBusinessProfileModal(
 ) {
     if (!isVisible) return
 
+    val context = LocalContext.current
     var logoUri by remember(settings) { mutableStateOf(settings.logoUri) }
     var businessName by remember(settings) { mutableStateOf(settings.businessName) }
     var businessType by remember(settings) { mutableStateOf(settings.businessType) }
@@ -110,7 +111,9 @@ fun EditBusinessProfileModal(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? ->
         if (uri != null) {
-            logoUri = uri.toString()
+            val digits = phoneWhatsapp.filter { it.isDigit() }.takeLast(10)
+            val accountKey = if (digits.length >= 10) "store_$digits" else "store_default"
+            logoUri = com.example.util.ImageCompressionUtil.persistStoreLogo(context, uri.toString(), accountKey)
         }
     }
 

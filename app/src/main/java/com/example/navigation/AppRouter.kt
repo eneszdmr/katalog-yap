@@ -1,19 +1,44 @@
 package com.example.navigation
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.NotificationsActive
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -23,8 +48,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -60,6 +89,13 @@ import com.example.ui.screens.orders.OrderDetailScreen
 import com.example.ui.screens.publiccatalog.PublicCatalogScreen
 import com.example.ui.screens.resellers.ResellersScreen
 import com.example.ui.theme.BackgroundSlate
+import com.example.ui.theme.PrimaryBlue
+import com.example.ui.theme.SuccessGreen
+import com.example.ui.theme.SuccessGreenLight
+import com.example.ui.theme.SurfaceWhite
+import com.example.ui.theme.TextPrimary
+import com.example.ui.theme.TextSecondary
+import com.example.util.OrderNotificationHelper
 import com.example.util.PwaOfflineAndShortcutHelper
 import kotlinx.coroutines.delay
 
@@ -131,9 +167,18 @@ fun AppRouter() {
     val dataService = remember { LocalStorageDataService.getInstance(context) }
     val catalogs by dataService.catalogs.collectAsState()
     val products by dataService.products.collectAsState()
+    val latestOrderAlert by dataService.latestOrderAlert.collectAsState()
 
     var isOfflineBannerVisible by remember {
         mutableStateOf(!PwaOfflineAndShortcutHelper.isNetworkAvailable(context))
+    }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ -> }
+
+    LaunchedEffect(Unit) {
+        OrderNotificationHelper.ensureChannel(context)
     }
 
     AuthProvider(dataService = dataService) { authState ->
@@ -142,6 +187,29 @@ fun AppRouter() {
         val currentRoute = navBackStackEntry?.destination?.route
 
         var activeToast by remember { mutableStateOf<KYToastData?>(null) }
+
+        LaunchedEffect(authState.isAuthenticated, authState.isOnboardingCompleted) {
+            if (authState.isAuthenticated && authState.isOnboardingCompleted) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    val granted = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.POST_NOTIFICATIONS
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (!granted) {
+                        runCatching {
+                            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                    }
+                }
+            }
+        }
+
+        LaunchedEffect(latestOrderAlert?.id) {
+            if (latestOrderAlert != null) {
+                delay(8000L)
+                dataService.dismissLatestOrderAlert()
+            }
+        }
 
         LaunchedEffect(activeToast) {
             if (activeToast != null) {
@@ -234,6 +302,78 @@ fun AppRouter() {
                                 cachedCatalogCount = catalogs.size,
                                 cachedProductCount = products.size
                             )
+
+                            AnimatedVisibility(visible = latestOrderAlert != null && authState.isAuthenticated) {
+                                val alertOrder = latestOrderAlert
+                                if (alertOrder != null) {
+                                    Surface(
+                                        shape = RoundedCornerShape(14.dp),
+                                        color = SurfaceWhite,
+                                        border = BorderStroke(1.5.dp, SuccessGreen),
+                                        shadowElevation = 6.dp,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                                            .clickable {
+                                                dataService.dismissLatestOrderAlert()
+                                                navController.navigate(AppRoutes.orderDetailRoute(alertOrder.id))
+                                            }
+                                            .testTag("new_order_notification_banner")
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(38.dp)
+                                                        .clip(CircleShape)
+                                                        .background(SuccessGreenLight),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Outlined.NotificationsActive,
+                                                        contentDescription = "Yeni Sipariş Bildirimi",
+                                                        tint = SuccessGreen,
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.width(10.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = "Yeni Sipariş Geldi! (${alertOrder.orderNumber})",
+                                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.ExtraBold),
+                                                        color = TextPrimary
+                                                    )
+                                                    Text(
+                                                        text = "${alertOrder.customerName} • ${alertOrder.totalAmount.toInt()} ${alertOrder.currency} • Görüntülemek için dokunun",
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        color = TextSecondary
+                                                    )
+                                                }
+                                            }
+                                            IconButton(
+                                                onClick = { dataService.dismissLatestOrderAlert() },
+                                                modifier = Modifier.size(32.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Outlined.Close,
+                                                    contentDescription = "Bildirimi Kapat",
+                                                    tint = TextSecondary,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
 
                             NavHost(
                                 navController = navController,

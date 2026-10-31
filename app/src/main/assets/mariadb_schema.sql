@@ -222,4 +222,13 @@ CREATE TABLE IF NOT EXISTS `kv_snapshots` (
     PRIMARY KEY (`store_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS `catalog_live_sessions` (
+    `catalog_id` VARCHAR(128) NOT NULL,
+    `session_id` VARCHAR(128) NOT NULL,
+    `last_seen_at` BIGINT NOT NULL,
+    PRIMARY KEY (`catalog_id`, `session_id`),
+    KEY `idx_catalog_live_seen` (`catalog_id`, `last_seen_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 SET FOREIGN_KEY_CHECKS = 1;
+

@@ -94,6 +94,7 @@ fun CatalogCardItem(
     onAddTagClick: () -> Unit,
     onToggleVisibilityClick: () -> Unit,
     onDeleteClick: () -> Unit,
+    liveViewersCount: Int = 0,
     modifier: Modifier = Modifier
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -443,6 +444,20 @@ fun CatalogCardItem(
                             style = MaterialTheme.typography.labelMedium,
                             color = TextSecondary
                         )
+                        if (liveViewersCount > 0) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Surface(
+                                shape = CircleShape,
+                                color = Color(0xFFDCFCE7)
+                            ) {
+                                Text(
+                                    text = "● $liveViewersCount canlı",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = Color(0xFF15803D),
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {

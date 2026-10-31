@@ -56,6 +56,207 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "CatalogDocument": {
+      "title": "CatalogDocument",
+      "description": "Digital product catalog metadata shared with customers.",
+      "type": "object",
+      "properties": {
+        "catalogId": {
+          "type": "string",
+          "description": "Catalog identifier matching document ID."
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the store owner."
+        },
+        "title": {
+          "type": "string",
+          "description": "Catalog title."
+        },
+        "description": {
+          "type": "string",
+          "description": "Catalog description."
+        },
+        "slug": {
+          "type": "string",
+          "description": "URL-safe slug for public catalog sharing."
+        },
+        "shortCode": {
+          "type": "string",
+          "description": "Short code generated for /c/{shortCode} links."
+        },
+        "coverImageUrl": {
+          "type": "string",
+          "description": "HTTPS URL or compressed data:image/jpeg;base64 cover image."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Catalog tags."
+        },
+        "isActive": {
+          "type": "boolean",
+          "description": "Whether the catalog is published and visible to customers."
+        },
+        "productCount": {
+          "type": "integer",
+          "description": "Number of products in this catalog."
+        },
+        "viewCount": {
+          "type": "integer",
+          "description": "Total views count."
+        },
+        "orderCount": {
+          "type": "integer",
+          "description": "Total orders count."
+        },
+        "businessName": {
+          "type": "string",
+          "description": "Store display name."
+        },
+        "businessPhone": {
+          "type": "string",
+          "description": "Store WhatsApp phone."
+        },
+        "currencySymbol": {
+          "type": "string",
+          "description": "Currency symbol (e.g. ₺)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp."
+        }
+      },
+      "required": [
+        "catalogId",
+        "ownerId",
+        "title",
+        "description",
+        "slug",
+        "shortCode",
+        "coverImageUrl",
+        "tags",
+        "isActive",
+        "productCount",
+        "viewCount",
+        "orderCount",
+        "businessName",
+        "businessPhone",
+        "currencySymbol",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ProductDocument": {
+      "title": "ProductDocument",
+      "description": "Product item belonging to a catalog with compressed image and stock status.",
+      "type": "object",
+      "properties": {
+        "productId": {
+          "type": "string",
+          "description": "Product identifier matching document ID."
+        },
+        "catalogId": {
+          "type": "string",
+          "description": "Parent catalog identifier."
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the store owner."
+        },
+        "name": {
+          "type": "string",
+          "description": "Product name."
+        },
+        "description": {
+          "type": "string",
+          "description": "Product description."
+        },
+        "price": {
+          "type": "number",
+          "description": "Current selling price."
+        },
+        "originalPrice": {
+          "type": "number",
+          "description": "Optional strikethrough price (0 if none)."
+        },
+        "currency": {
+          "type": "string",
+          "description": "Currency symbol."
+        },
+        "imageUrl": {
+          "type": "string",
+          "description": "HTTPS URL or compressed data:image/jpeg;base64 main image."
+        },
+        "category": {
+          "type": "string",
+          "description": "Main category."
+        },
+        "subCategory": {
+          "type": "string",
+          "description": "Sub-category."
+        },
+        "sku": {
+          "type": "string",
+          "description": "Product SKU code."
+        },
+        "stockStatus": {
+          "type": "string",
+          "enum": ["IN_STOCK", "LOW_STOCK", "OUT_OF_STOCK"],
+          "description": "Stock availability enum."
+        },
+        "stockCount": {
+          "type": "integer",
+          "description": "Available quantity."
+        },
+        "inStock": {
+          "type": "boolean",
+          "description": "Whether product is in stock."
+        },
+        "sortOrder": {
+          "type": "integer",
+          "description": "Display sort order within catalog."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp."
+        }
+      },
+      "required": [
+        "productId",
+        "catalogId",
+        "ownerId",
+        "name",
+        "description",
+        "price",
+        "originalPrice",
+        "currency",
+        "imageUrl",
+        "category",
+        "subCategory",
+        "sku",
+        "stockStatus",
+        "stockCount",
+        "inStock",
+        "sortOrder",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -64,6 +265,18 @@
         "$ref": "#/entities/UserAccount"
       },
       "description": "Per-user account document owned strictly by request.auth.uid == userId."
+    },
+    "/catalogs/{catalogId}": {
+      "schema": {
+        "$ref": "#/entities/CatalogDocument"
+      },
+      "description": "Digital catalogs readable publicly when active and writable by their authenticated owner."
+    },
+    "/products/{productId}": {
+      "schema": {
+        "$ref": "#/entities/ProductDocument"
+      },
+      "description": "Catalog products readable by customers and writable by their authenticated owner."
     }
   }
 }

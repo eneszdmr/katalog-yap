@@ -81,21 +81,20 @@ class AuthContextState(
 
         val fullPhone = "$countryCode $cleanPhone"
         val incomingHash = AuthAccountRepository.sha256Hex(passwordPlain)
-        val existingCred = dataService.getPhoneCredential(fullPhone)
-
-        if (!isRegisterOrSetPasswordMode && existingCred != null && existingCred.passwordHash != incomingHash) {
-            onError("Girdiğiniz şifre bu telefon numarası için hatalı. Şifrenizi unuttuysanız sıfırlayabilirsiniz.")
-            return
-        }
-
-        val isSettingPasswordNow = isRegisterOrSetPasswordMode || existingCred == null
-        val resolvedEmail = recoveryEmail.trim().ifBlank { existingCred?.recoveryEmail.orEmpty() }
-        val hasExistingStore = storeSettings.businessName.isNotBlank()
-        val firebaseUid = runCatching { Firebase.auth.currentUser?.uid.orEmpty() }.getOrDefault("")
 
         onUpdatePendingPhone(countryCode, cleanPhone)
 
         scope.launch {
+            val existingCred = dataService.getPhoneCredential(fullPhone)
+            if (!isRegisterOrSetPasswordMode && existingCred != null && existingCred.passwordHash != incomingHash) {
+                onError("Girdiğiniz şifre bu telefon numarası için hatalı. Şifrenizi unuttuysanız sıfırlayabilirsiniz.")
+                return@launch
+            }
+
+            val isSettingPasswordNow = isRegisterOrSetPasswordMode || existingCred == null
+            val resolvedEmail = recoveryEmail.trim().ifBlank { existingCred?.recoveryEmail.orEmpty() }
+            val firebaseUid = runCatching { Firebase.auth.currentUser?.uid.orEmpty() }.getOrDefault("")
+
             dataService.savePhoneCredential(
                 PhonePasswordCredential(
                     fullPhone = fullPhone,
@@ -107,36 +106,30 @@ class AuthContextState(
                 )
             )
 
-            val user = AuthUser(
-                id = currentUser?.id ?: firebaseUid.ifBlank { UUID.randomUUID().toString() },
-                phoneCountryCode = countryCode,
+            // Bu telefon numarasına özel mağaza ve katalog oturumunu yükle veya yeni mağaza olarak başlat!
+            val (activatedUser, needsOnboarding) = dataService.activateUserAccountSession(
+                countryCode = countryCode,
                 phoneNumber = cleanPhone,
-                fullPhone = fullPhone,
-                email = resolvedEmail,
-                displayName = storeSettings.businessName.ifBlank { "Katalog Yap Kullanıcısı" },
                 passwordHash = incomingHash,
+                recoveryEmail = resolvedEmail,
                 firebaseUid = firebaseUid,
                 provider = "phone_password",
-                isOnboardingCompleted = hasExistingStore
+                displayNameHint = ""
             )
-            dataService.saveAuthUser(user)
-
-            if (storeSettings.phoneWhatsapp.isBlank() || storeSettings.phoneWhatsapp == "+90 ") {
-                dataService.updateSettings(storeSettings.copy(phoneWhatsapp = fullPhone))
-            }
 
             // Firebase oturumu açıksa Firestore /users/{userId} kaydını senkronize et
             runCatching {
+                val activeDisplayName = dataService.settings.value.businessName.ifBlank { activatedUser.displayName }
                 AuthAccountRepository(appContext).upsertUserAccountIfSignedIn(
                     phone = fullPhone,
                     email = resolvedEmail,
-                    displayName = user.displayName,
+                    displayName = activeDisplayName,
                     provider = "phone_password",
                     passwordHash = incomingHash
                 )
             }
 
-            onSuccess(!hasExistingStore, isSettingPasswordNow)
+            onSuccess(needsOnboarding, isSettingPasswordNow)
         }
     }
 
@@ -154,39 +147,33 @@ class AuthContextState(
                 onError = onError
             ) ?: return@launch
 
-            val hasExistingStore = storeSettings.businessName.isNotBlank()
             val email = firebaseUser.email.orEmpty()
             val displayName = firebaseUser.displayName?.takeIf { it.isNotBlank() }
                 ?: email.substringBefore("@").ifBlank { "Google Kullanıcısı" }
             val phone = firebaseUser.phoneNumber?.takeIf { it.isNotBlank() }
-                ?: storeSettings.phoneWhatsapp.takeIf { it.isNotBlank() && it != "+90 " }
                 ?: "+90 532 000 00 00"
 
-            val user = AuthUser(
-                id = firebaseUser.uid,
-                phoneCountryCode = "+90",
+            val (_, needsOnboarding) = dataService.activateUserAccountSession(
+                countryCode = "+90",
                 phoneNumber = phone.removePrefix("+90").trim(),
-                fullPhone = phone,
-                email = email,
-                displayName = displayName,
                 passwordHash = "",
+                recoveryEmail = email,
                 firebaseUid = firebaseUser.uid,
                 provider = "google",
-                isOnboardingCompleted = hasExistingStore
+                displayNameHint = displayName
             )
-            dataService.saveAuthUser(user)
 
             runCatching {
                 AuthAccountRepository(appContext).upsertUserAccountIfSignedIn(
                     phone = phone,
                     email = email,
-                    displayName = displayName,
+                    displayName = dataService.settings.value.businessName.ifBlank { displayName },
                     provider = "google",
                     passwordHash = ""
                 )
             }
 
-            onSuccess(!hasExistingStore, displayName)
+            onSuccess(needsOnboarding, dataService.settings.value.businessName.ifBlank { displayName })
         }
     }
 
@@ -272,26 +259,18 @@ class AuthContextState(
             return false
         }
         val cleanPhone = pendingPhoneNumber.ifBlank { "555 123 45 67" }
-        val fullPhone = "$pendingCountryCode $cleanPhone"
-        val hasExistingStore = storeSettings.businessName.isNotBlank()
-
-        val user = AuthUser(
-            id = currentUser?.id ?: UUID.randomUUID().toString(),
-            phoneCountryCode = pendingCountryCode,
-            phoneNumber = cleanPhone,
-            fullPhone = fullPhone,
-            provider = "phone_password",
-            isOnboardingCompleted = hasExistingStore
-        )
 
         scope.launch {
-            dataService.saveAuthUser(user)
-            if (storeSettings.phoneWhatsapp.isBlank() || storeSettings.phoneWhatsapp == "+90 ") {
-                dataService.updateSettings(
-                    storeSettings.copy(phoneWhatsapp = fullPhone)
-                )
-            }
-            onSuccess(!hasExistingStore)
+            val (_, needsOnboarding) = dataService.activateUserAccountSession(
+                countryCode = pendingCountryCode,
+                phoneNumber = cleanPhone,
+                passwordHash = "",
+                recoveryEmail = "",
+                firebaseUid = "",
+                provider = "phone_password",
+                displayNameHint = ""
+            )
+            onSuccess(needsOnboarding)
         }
         return true
     }
@@ -300,24 +279,17 @@ class AuthContextState(
      * Apple veya Google demo giriş yedek akışı.
      */
     fun loginWithSocialDemo(provider: String, onSuccess: (needsOnboarding: Boolean) -> Unit) {
-        val hasExistingStore = storeSettings.businessName.isNotBlank()
-        val demoPhone = "+90 532 000 00 00"
-        val user = AuthUser(
-            id = currentUser?.id ?: UUID.randomUUID().toString(),
-            phoneCountryCode = "+90",
-            phoneNumber = "532 000 00 00",
-            fullPhone = demoPhone,
-            provider = provider,
-            isOnboardingCompleted = hasExistingStore
-        )
         scope.launch {
-            dataService.saveAuthUser(user)
-            if (storeSettings.phoneWhatsapp.isBlank() || storeSettings.phoneWhatsapp == "+90 ") {
-                dataService.updateSettings(
-                    storeSettings.copy(phoneWhatsapp = demoPhone)
-                )
-            }
-            onSuccess(!hasExistingStore)
+            val (_, needsOnboarding) = dataService.activateUserAccountSession(
+                countryCode = "+90",
+                phoneNumber = "532 000 00 00",
+                passwordHash = "",
+                recoveryEmail = "",
+                firebaseUid = "",
+                provider = provider,
+                displayNameHint = ""
+            )
+            onSuccess(needsOnboarding)
         }
     }
 
@@ -347,33 +319,35 @@ class AuthContextState(
             .trim('-')
             .ifBlank { "magazam" }
 
-        val updatedSettings = storeSettings.copy(
-            businessName = businessName.trim(),
-            businessType = businessType,
-            logoUri = logoUri,
-            phoneWhatsapp = whatsappNumber.trim(),
-            city = city.trim(),
-            currencyCode = currencyCode,
-            currencySymbol = currencySymbol,
-            catalogLanguage = catalogLanguage,
-            customSlug = slug
-        )
-
-        val baseUser = currentUser ?: AuthUser(
-            id = UUID.randomUUID().toString(),
-            phoneCountryCode = pendingCountryCode,
-            phoneNumber = pendingPhoneNumber,
-            fullPhone = whatsappNumber.trim(),
-            provider = "phone_password"
-        )
-        val updatedUser = baseUser.copy(
-            displayName = businessName.trim(),
-            isOnboardingCompleted = true
-        )
-
         scope.launch {
+            val currentSettings = dataService.settings.value
+            val updatedSettings = currentSettings.copy(
+                businessName = businessName.trim(),
+                businessType = businessType,
+                logoUri = logoUri.trim(),
+                phoneWhatsapp = whatsappNumber.trim(),
+                city = city.trim(),
+                currencyCode = currencyCode,
+                currencySymbol = currencySymbol,
+                catalogLanguage = catalogLanguage,
+                customSlug = slug
+            )
+
             dataService.updateSettings(updatedSettings)
+
+            val baseUser = dataService.authUser.value ?: currentUser ?: AuthUser(
+                id = UUID.randomUUID().toString(),
+                phoneCountryCode = pendingCountryCode,
+                phoneNumber = pendingPhoneNumber,
+                fullPhone = whatsappNumber.trim(),
+                provider = "phone_password"
+            )
+            val updatedUser = baseUser.copy(
+                displayName = businessName.trim(),
+                isOnboardingCompleted = true
+            )
             dataService.saveAuthUser(updatedUser)
+
             runCatching {
                 AuthAccountRepository(appContext).upsertUserAccountIfSignedIn(
                     phone = updatedUser.fullPhone,

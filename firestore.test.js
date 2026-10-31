@@ -110,3 +110,81 @@ test('authenticated user cannot create document with invalid provider or mismatc
     ref.set(validUserPayload('different_user'))
   );
 });
+
+function validCatalogPayload(catalogId, ownerId, overrides = {}) {
+  const now = new Date();
+  return {
+    catalogId,
+    ownerId,
+    title: 'Yaz Koleksiyonu',
+    description: 'Yeni sezon ürünler',
+    slug: 'yaz-koleksiyonu',
+    shortCode: 'yaz123',
+    coverImageUrl: 'https://constantinopolishotel.store/cover.jpg',
+    tags: ['Yeni', 'Yaz'],
+    isActive: true,
+    productCount: 1,
+    viewCount: 0,
+    orderCount: 0,
+    businessName: 'Anadolu Toptan',
+    businessPhone: '+90 5321234567',
+    currencySymbol: '₺',
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+function validProductPayload(productId, catalogId, ownerId, overrides = {}) {
+  const now = new Date();
+  return {
+    productId,
+    catalogId,
+    ownerId,
+    name: 'Keten Gömlek',
+    description: 'Yüzde yüz keten',
+    price: 499.0,
+    originalPrice: 599.0,
+    currency: '₺',
+    imageUrl: 'data:image/jpeg;base64,/9j/4AAQSkZJRg==',
+    category: 'Giyim',
+    subCategory: 'Gömlek',
+    sku: 'KTN-01',
+    stockStatus: 'IN_STOCK',
+    stockCount: 25,
+    inStock: true,
+    sortOrder: 0,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+test('anyone can read public catalogs and products, only owner can create/update/delete', async () => {
+  const ownerDb = testEnv.authenticatedContext('owner_1').firestore();
+  const catRef = ownerDb.collection('catalogs').doc('cat_1');
+  const prodRef = ownerDb.collection('products').doc('prod_1');
+
+  await assertSucceeds(catRef.set(validCatalogPayload('cat_1', 'owner_1')));
+  await assertSucceeds(prodRef.set(validProductPayload('prod_1', 'cat_1', 'owner_1')));
+
+  // Unauthenticated customer can read shared catalog and products
+  const publicDb = testEnv.unauthenticatedContext().firestore();
+  const pubCatSnap = await assertSucceeds(publicDb.collection('catalogs').doc('cat_1').get());
+  assert.equal(pubCatSnap.exists, true);
+  const pubProdSnap = await assertSucceeds(publicDb.collection('products').doc('prod_1').get());
+  assert.equal(pubProdSnap.exists, true);
+
+  // Unauthenticated or different user cannot modify or delete
+  await assertFails(publicDb.collection('catalogs').doc('cat_1').delete());
+  const attackerDb = testEnv.authenticatedContext('attacker_2').firestore();
+  await assertFails(
+    attackerDb.collection('catalogs').doc('cat_1').update({
+      title: 'Hacked Catalog',
+      updatedAt: new Date(),
+    })
+  );
+  await assertFails(attackerDb.collection('products').doc('prod_1').delete());
+});
+
+

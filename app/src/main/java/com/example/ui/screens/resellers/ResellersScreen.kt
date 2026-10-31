@@ -541,10 +541,16 @@ private fun ResellerCardItem(
     onEditClick: () -> Unit,
     onDeleteClick: () -> Unit
 ) {
-    val specialLink = "https://katalogyap.app/c/${reseller.shortCode}"
     val visibleCatalogs = remember(allCatalogs, reseller.visibleCatalogIds) {
         allCatalogs.filter { it.id in reseller.visibleCatalogIds }
     }
+    val primaryCatSlug = remember(visibleCatalogs, allCatalogs, reseller.shortCode) {
+        visibleCatalogs.firstOrNull { it.isActive }?.let { it.slug.ifBlank { it.id } }
+            ?: visibleCatalogs.firstOrNull()?.let { it.slug.ifBlank { it.id } }
+            ?: allCatalogs.firstOrNull { it.isActive }?.let { it.slug.ifBlank { it.id } }
+            ?: reseller.shortCode
+    }
+    val specialLink = "https://constantinopolishotel.store/?c=$primaryCatSlug&bayi=${reseller.shortCode}"
 
     KYCard(
         modifier = Modifier

@@ -1,5 +1,8 @@
 package com.example.ui.screens
 
+import com.example.model.Product
+
+
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -437,6 +440,7 @@ fun OrdersDraftScreen(
                 items(filteredOrders, key = { it.id }) { order ->
                     OrderListCard(
                         order = order,
+                        products = products,
                         onClick = { onOrderClick(order.id) }
                     )
                 }
@@ -480,6 +484,7 @@ private fun StatusFilterChip(
 @Composable
 private fun OrderListCard(
     order: Order,
+    products: List<Product> = emptyList(),
     onClick: () -> Unit
 ) {
     val totalItemQuantity = remember(order.items) {
@@ -628,20 +633,42 @@ private fun OrderListCard(
                 if (order.items.isNotEmpty()) {
                     Spacer(modifier = Modifier.width(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy((-8).dp)) {
-                        order.items.take(3).forEachIndexed { idx, item ->
-                            val imgUrl = item.imageUrl.ifBlank {
-                                "https://picsum.photos/seed/${item.productId}-$idx/200/200"
+                        order.items.take(3).forEachIndexed { _, item ->
+                            val matched = products.find { it.id == item.productId || it.name.trim().equals(item.productName.trim(), ignoreCase = true) }
+                            val imgUrl = when {
+                                !matched?.imageUrl.isNullOrBlank() -> matched!!.imageUrl
+                                item.imageUrl.isNotBlank() && !item.imageUrl.contains("picsum.photos/seed/") -> item.imageUrl
+                                !matched?.galleryUrls.isNullOrEmpty() -> matched!!.galleryUrls.first()
+                                else -> item.imageUrl.takeIf { !it.contains("picsum.photos/seed/") }.orEmpty()
                             }
-                            AsyncImage(
-                                model = imgUrl,
-                                contentDescription = item.productName,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .clip(CircleShape)
-                                    .border(1.5.dp, SurfaceWhite, CircleShape)
-                                    .background(SurfaceMuted)
-                            )
+                            if (imgUrl.isNotBlank()) {
+                                AsyncImage(
+                                    model = imgUrl,
+                                    contentDescription = item.productName,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .border(1.5.dp, SurfaceWhite, CircleShape)
+                                        .background(SurfaceMuted)
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .border(1.5.dp, SurfaceWhite, CircleShape)
+                                        .background(SurfaceMuted),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Outlined.Inventory2,
+                                        contentDescription = item.productName,
+                                        tint = TextSecondary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                 }

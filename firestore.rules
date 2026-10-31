@@ -46,6 +46,90 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidCatalog(data) {
+      let keys = [
+        'catalogId',
+        'ownerId',
+        'title',
+        'description',
+        'slug',
+        'shortCode',
+        'coverImageUrl',
+        'tags',
+        'isActive',
+        'productCount',
+        'viewCount',
+        'orderCount',
+        'businessName',
+        'businessPhone',
+        'currencySymbol',
+        'createdAt',
+        'updatedAt'
+      ];
+      return data.keys().hasAll(keys)
+        && data.keys().hasOnly(keys)
+        && data.catalogId is string && data.catalogId.size() >= 1 && data.catalogId.size() <= 128
+        && data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && data.description is string && data.description.size() <= 2000
+        && data.slug is string && data.slug.size() >= 1 && data.slug.size() <= 200
+        && data.shortCode is string && data.shortCode.size() >= 1 && data.shortCode.size() <= 64
+        && data.coverImageUrl is string && data.coverImageUrl.size() <= 350000
+        && data.tags is list && data.tags.size() <= 25
+        && data.isActive is bool
+        && data.productCount is int && data.productCount >= 0
+        && data.viewCount is int && data.viewCount >= 0
+        && data.orderCount is int && data.orderCount >= 0
+        && data.businessName is string && data.businessName.size() <= 200
+        && data.businessPhone is string && data.businessPhone.size() <= 40
+        && data.currencySymbol is string && data.currencySymbol.size() <= 16
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidProduct(data) {
+      let keys = [
+        'productId',
+        'catalogId',
+        'ownerId',
+        'name',
+        'description',
+        'price',
+        'originalPrice',
+        'currency',
+        'imageUrl',
+        'category',
+        'subCategory',
+        'sku',
+        'stockStatus',
+        'stockCount',
+        'inStock',
+        'sortOrder',
+        'createdAt',
+        'updatedAt'
+      ];
+      return data.keys().hasAll(keys)
+        && data.keys().hasOnly(keys)
+        && data.productId is string && data.productId.size() >= 1 && data.productId.size() <= 128
+        && data.catalogId is string && data.catalogId.size() >= 1 && data.catalogId.size() <= 128
+        && data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 200
+        && data.description is string && data.description.size() <= 3000
+        && (data.price is int || data.price is float) && data.price >= 0
+        && (data.originalPrice is int || data.originalPrice is float) && data.originalPrice >= 0
+        && data.currency is string && data.currency.size() >= 1 && data.currency.size() <= 16
+        && data.imageUrl is string && data.imageUrl.size() <= 350000
+        && data.category is string && data.category.size() <= 120
+        && data.subCategory is string && data.subCategory.size() <= 120
+        && data.sku is string && data.sku.size() <= 80
+        && data.stockStatus is string && data.stockStatus in ['IN_STOCK', 'LOW_STOCK', 'OUT_OF_STOCK']
+        && data.stockCount is int && data.stockCount >= 0
+        && data.inStock is bool
+        && data.sortOrder is int && data.sortOrder >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     match /users/{userId} {
       allow get, list: if isSignedIn() && request.auth.uid == userId;
 
@@ -71,6 +155,45 @@ service cloud.firestore {
         ]);
 
       allow delete: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    match /catalogs/{catalogId} {
+      allow get, list: if existing().isActive == true
+        || (isSignedIn() && existing().ownerId == request.auth.uid);
+
+      allow create: if isSignedIn()
+        && isValidId(catalogId)
+        && isValidCatalog(incoming())
+        && incoming().catalogId == catalogId
+        && incoming().ownerId == request.auth.uid;
+
+      allow update: if isSignedIn()
+        && existing().ownerId == request.auth.uid
+        && isValidCatalog(incoming())
+        && incoming().catalogId == existing().catalogId
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt;
+
+      allow delete: if isSignedIn() && existing().ownerId == request.auth.uid;
+    }
+
+    match /products/{productId} {
+      allow get, list: if existing().catalogId is string && existing().catalogId.size() >= 1;
+
+      allow create: if isSignedIn()
+        && isValidId(productId)
+        && isValidProduct(incoming())
+        && incoming().productId == productId
+        && incoming().ownerId == request.auth.uid;
+
+      allow update: if isSignedIn()
+        && existing().ownerId == request.auth.uid
+        && isValidProduct(incoming())
+        && incoming().productId == existing().productId
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt;
+
+      allow delete: if isSignedIn() && existing().ownerId == request.auth.uid;
     }
   }
 }

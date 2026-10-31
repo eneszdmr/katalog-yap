@@ -152,11 +152,15 @@ fun AddOrEditProductModal(
         }
     }
 
+    val context = androidx.compose.ui.platform.LocalContext.current
     val photoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
-            pickedImageUri = uri.toString()
+            scope.launch {
+                val compressed = com.example.util.ImageCompressionUtil.compressUriToMax1280(context, uri)
+                pickedImageUri = compressed ?: uri.toString()
+            }
         }
     }
 

@@ -48,10 +48,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
 import com.example.auth.LocalAuthContext
 import com.example.i18n.TrStrings
 import com.example.model.BusinessType
@@ -77,6 +80,7 @@ import com.example.ui.theme.SurfaceMuted
 import com.example.ui.theme.SurfaceWhite
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import com.example.util.ImageCompressionUtil
 
 private val quickCities = listOf("İstanbul", "Ankara", "İzmir", "Bursa", "Antalya", "Gaziantep")
 
@@ -93,6 +97,7 @@ fun OnboardingScreen(
     onShowToast: (KYToastData) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val authContext = LocalAuthContext.current
     val existingSettings = authContext.storeSettings
 
@@ -135,12 +140,14 @@ fun OnboardingScreen(
         )
     }
 
-    // Android Zero-Permission Photo Picker
+    // Android Zero-Permission Photo Picker (Logoyu kalıcı dosya olarak kaydeder)
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
-            logoUri = uri.toString()
+            val phoneDigits = whatsappNumber.filter { it.isDigit() }.takeLast(10)
+            val accountKey = if (phoneDigits.length >= 10) "store_$phoneDigits" else "store_default"
+            logoUri = ImageCompressionUtil.persistStoreLogo(context, uri.toString(), accountKey)
         }
     }
 
@@ -317,7 +324,7 @@ fun OnboardingScreen(
                                     .size(84.dp)
                                     .clip(CircleShape)
                                     .background(
-                                        if (logoUri.isNotBlank()) PrimaryBlue else PrimaryBlueSubtle
+                                        if (logoUri.isNotBlank()) SurfaceMuted else PrimaryBlueSubtle
                                     )
                                     .border(2.dp, PrimaryBlue, CircleShape)
                                     .clickable {
@@ -328,28 +335,22 @@ fun OnboardingScreen(
                                     .testTag("onboarding_logo_circle"),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    if (logoUri.isNotBlank()) {
-                                        Icon(
-                                            imageVector = Icons.Outlined.CheckCircle,
-                                            contentDescription = null,
-                                            tint = SurfaceWhite,
-                                            modifier = Modifier.size(26.dp)
-                                        )
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            text = initials,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = SurfaceWhite
-                                        )
-                                    } else {
-                                        Text(
-                                            text = initials,
-                                            style = MaterialTheme.typography.headlineMedium,
-                                            color = PrimaryBlue,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
+                                if (logoUri.isNotBlank()) {
+                                    AsyncImage(
+                                        model = logoUri,
+                                        contentDescription = "Mağaza Logosu",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .clip(CircleShape)
+                                    )
+                                } else {
+                                    Text(
+                                        text = initials,
+                                        style = MaterialTheme.typography.headlineMedium,
+                                        color = PrimaryBlue,
+                                        fontWeight = FontWeight.Bold
+                                    )
                                 }
                             }
 

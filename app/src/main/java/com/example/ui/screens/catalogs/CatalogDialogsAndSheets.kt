@@ -1059,7 +1059,8 @@ fun ShareCatalogBottomSheet(
     val context = LocalContext.current
     if (catalog == null) return
 
-    val shareUrl = "https://katalogyap.app/$storeSlug/${catalog.slug}"
+    val catalogKey = catalog.slug.ifBlank { catalog.id }
+    val shareUrl = "https://constantinopolishotel.store/?c=$catalogKey"
     val shareMessage = "${catalog.title} dijital ürün kataloğumuza göz atın: $shareUrl"
 
     KYBottomSheet(

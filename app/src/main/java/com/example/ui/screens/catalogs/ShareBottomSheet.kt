@@ -52,6 +52,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -143,11 +144,27 @@ fun KYShareBottomSheet(
     val allProducts by dataService.products.collectAsState()
 
     val targetCatalog = remember(catalog, product, allCatalogs) {
-        catalog ?: allCatalogs.find { it.id == product?.catalogId } ?: allCatalogs.firstOrNull()
+        val lookupId = catalog?.id ?: product?.catalogId
+        allCatalogs.find { it.id == lookupId } ?: catalog ?: allCatalogs.firstOrNull()
+    }
+
+    var isSyncingToWeb by remember(targetCatalog?.id) { mutableStateOf(false) }
+    var isSyncedToWeb by remember(targetCatalog?.id) { mutableStateOf(false) }
+
+    // Paylaşım penceresi açıldığında kataloğun yayında (isActive = true) olduğundan ve
+    // MariaDB + Firebase Firestore + Web vitriniyle anında senkronize edildiğinden emin ol
+    LaunchedEffect(isVisible, targetCatalog?.id) {
+        if (isVisible && targetCatalog != null) {
+            isSyncingToWeb = true
+            dataService.ensureCatalogPublishedAndSynced(targetCatalog.id)
+            isSyncingToWeb = false
+            isSyncedToWeb = true
+        }
     }
 
     val catalogProducts = remember(targetCatalog, product, allProducts) {
         when {
+            targetCatalog != null && product == null -> allProducts.filter { it.catalogId == targetCatalog.id }.sortedBy { it.sortOrder }
             catalog != null -> allProducts.filter { it.catalogId == catalog.id }.sortedBy { it.sortOrder }
             product != null -> listOf(product)
             else -> emptyList()
@@ -195,14 +212,41 @@ fun KYShareBottomSheet(
     val targetType = if (product != null) "product" else "catalog"
     val currencySymbol = product?.currency ?: store.currencySymbol.ifBlank { "₺" }
 
+    val catalogKeyForWeb = remember(targetCatalog, targetId) {
+        targetCatalog?.slug?.ifBlank { targetCatalog.id } ?: targetId
+    }
     val shortPath = remember(targetId, product) {
         ShareExportGenerator.generateShortPath(
             seedId = targetId,
             prefix = if (product != null) "p" else "c"
         )
     }
-    val fullShortUrl = remember(shortPath, shareSettings) {
-        ShareExportGenerator.generateFullShortUrl(shortPath, shareSettings)
+    val fullShortUrl = remember(shortPath, shareSettings, catalogKeyForWeb) {
+        ShareExportGenerator.generateFullShortUrl(
+            shortPath = shortPath,
+            settings = shareSettings,
+            catalogSlugOrId = catalogKeyForWeb
+        )
+    }
+
+    suspend fun ensureTargetCatalogSyncedAndResolveUrl(): String {
+        val catId = targetCatalog?.id
+        if (!catId.isNullOrBlank()) {
+            if (!isSyncedToWeb || isSyncingToWeb) {
+                isSyncingToWeb = true
+                dataService.ensureCatalogPublishedAndSynced(catId)
+                isSyncingToWeb = false
+                isSyncedToWeb = true
+            }
+            val latestCat = dataService.catalogs.value.find { it.id == catId } ?: targetCatalog
+            val latestKey = latestCat?.slug?.ifBlank { latestCat.id } ?: catalogKeyForWeb
+            return ShareExportGenerator.generateFullShortUrl(
+                shortPath = shortPath,
+                settings = shareSettings,
+                catalogSlugOrId = latestKey
+            )
+        }
+        return fullShortUrl
     }
 
     fun recordEvent(
@@ -306,42 +350,54 @@ fun KYShareBottomSheet(
                         currencySymbol = currencySymbol,
                         settings = shareSettings,
                         onCopyClick = {
-                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                            clipboard?.setPrimaryClip(ClipData.newPlainText(targetTitle, fullShortUrl))
-                            recordEvent(channel = "link_copy")
-                            onShowToast(
-                                KYToastData(
-                                    message = TrStrings.Catalogs.TOAST_LINK_COPIED,
-                                    type = KYToastType.SUCCESS
+                            scope.launch {
+                                val syncedUrl = ensureTargetCatalogSyncedAndResolveUrl()
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                clipboard?.setPrimaryClip(ClipData.newPlainText(targetTitle, syncedUrl))
+                                recordEvent(channel = "link_copy", link = syncedUrl)
+                                onShowToast(
+                                    KYToastData(
+                                        message = TrStrings.Catalogs.TOAST_LINK_COPIED,
+                                        type = KYToastType.SUCCESS
+                                    )
                                 )
-                            )
+                            }
                         },
                         onWhatsAppClick = {
-                            recordEvent(channel = "whatsapp")
-                            ShareExportGenerator.shareToWhatsApp(
-                                context = context,
-                                title = targetTitle,
-                                shortUrl = fullShortUrl,
-                                store = store,
-                                settings = shareSettings,
-                                extraSummary = if (product != null) {
-                                    if (shareSettings.showPrices) {
-                                        val p = shareSettings.calculateAdjustedPrice(product.price).roundToInt()
-                                        "Fiyat: $p $currencySymbol • SKU: ${product.sku}"
+                            scope.launch {
+                                val syncedUrl = ensureTargetCatalogSyncedAndResolveUrl()
+                                recordEvent(channel = "whatsapp", link = syncedUrl)
+                                ShareExportGenerator.shareToWhatsApp(
+                                    context = context,
+                                    title = targetTitle,
+                                    shortUrl = syncedUrl,
+                                    store = store,
+                                    settings = shareSettings,
+                                    extraSummary = if (product != null) {
+                                        if (shareSettings.showPrices) {
+                                            val p = shareSettings.calculateAdjustedPrice(product.price).roundToInt()
+                                            "Fiyat: $p $currencySymbol • SKU: ${product.sku}"
+                                        } else {
+                                            "SKU: ${product.sku}"
+                                        }
                                     } else {
-                                        "SKU: ${product.sku}"
+                                        "${catalogProducts.size} ürünlük dijital katalog"
                                     }
-                                } else {
-                                    "${catalogProducts.size} ürünlük dijital katalog"
-                                }
-                            )
+                                )
+                            }
                         },
                         onOpenPublicViewClick = if (onOpenPublicCatalog != null) {
                             {
-                                val shortCode = shortPath.substringAfterLast("/").ifBlank { targetCatalog?.id ?: "cat-1" }
-                                recordEvent(channel = "public_preview")
-                                onDismiss()
-                                onOpenPublicCatalog(shortCode)
+                                scope.launch {
+                                    ensureTargetCatalogSyncedAndResolveUrl()
+                                    val latestCat = dataService.catalogs.value.find { it.id == targetCatalog?.id } ?: targetCatalog
+                                    val shortCode = latestCat?.slug?.takeIf { it.isNotBlank() }
+                                        ?: latestCat?.id
+                                        ?: shortPath.substringAfterLast("/").ifBlank { "cat-1" }
+                                    recordEvent(channel = "public_preview")
+                                    onDismiss()
+                                    onOpenPublicCatalog(shortCode)
+                                }
                             }
                         } else null
                     )
@@ -379,9 +435,14 @@ fun KYShareBottomSheet(
                                     recordEvent(channel = "pdf_download")
                                     onShowToast(
                                         KYToastData(
-                                            message = "${TrStrings.Share.TOAST_PDF_DOWNLOADED} (${pdfFile.name})",
+                                            message = "İndirilenler/KatalogYap/${pdfFile.name} konumuna kaydedildi",
                                             type = KYToastType.SUCCESS
                                         )
+                                    )
+                                    ShareExportGenerator.openPdfFile(
+                                        context = context,
+                                        file = pdfFile,
+                                        chooserTitle = "$targetTitle PDF Broşür"
                                     )
                                 }
                             }
@@ -506,6 +567,10 @@ fun KYShareBottomSheet(
                 //    seçilenleri tek bir "koleksiyon" linkine birleştir.
                 // =========================================================================
                 ShareOptionType.MULTI_CATALOG -> {
+                    val firstSelectedCatalogSlug = allCatalogs
+                        .firstOrNull { it.id in selectedCollectionCatalogIds }
+                        ?.let { it.slug.ifBlank { it.id } }
+                        .orEmpty()
                     val collectionSeed = selectedCollectionCatalogIds.sorted().joinToString("-")
                         .ifBlank { "koleksiyon" }
                     val collectionShortPath = ShareExportGenerator.generateShortPath(
@@ -514,7 +579,8 @@ fun KYShareBottomSheet(
                     )
                     val collectionUrl = ShareExportGenerator.generateFullShortUrl(
                         shortPath = collectionShortPath,
-                        settings = shareSettings
+                        settings = shareSettings,
+                        catalogSlugOrId = firstSelectedCatalogSlug
                     )
 
                     MultiCatalogCollectionShareContent(

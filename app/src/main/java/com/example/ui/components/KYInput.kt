@@ -23,6 +23,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.ui.theme.BorderLight
@@ -58,6 +59,7 @@ fun KYInput(
     maxLines: Int = if (singleLine) 1 else 6,
     enabled: Boolean = true,
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+    visualTransformation: VisualTransformation = VisualTransformation.None,
     tag: String = "ky_input"
 ) {
     val isError = !errorText.isNullOrBlank()
@@ -124,6 +126,7 @@ fun KYInput(
                 }
             } else null,
             keyboardOptions = keyboardOptions,
+            visualTransformation = visualTransformation,
             colors = OutlinedTextFieldDefaults.colors(
                 focusedContainerColor = SurfaceWhite,
                 unfocusedContainerColor = SurfaceWhite,

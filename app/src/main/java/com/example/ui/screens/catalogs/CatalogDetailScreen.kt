@@ -1,6 +1,10 @@
 package com.example.ui.screens.catalogs
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -108,6 +112,8 @@ import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.WarningAmberDark
 import kotlinx.coroutines.launch
+import com.example.util.ImageCompressionUtil
+
 
 /**
  * KATALOG DETAY EKRANI (/catalogues/:id):
@@ -153,6 +159,23 @@ fun CatalogDetailScreen(
     var searchQuery by remember { mutableStateOf("") }
     var sortOption by remember { mutableStateOf(ProductSortOption.CUSTOM) }
     var showSortMenu by remember { mutableStateOf(false) }
+
+    var isCompressingImage by remember { mutableStateOf(false) }
+    val coverLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                isCompressingImage = true
+                val compressedUrl = ImageCompressionUtil.compressUriToMax1280(context, uri) ?: uri.toString()
+                isCompressingImage = false
+                catalog?.let {
+                    dataService.saveCatalog(it.copy(coverImageUrl = compressedUrl))
+                }
+                onShowToast(KYToastData("Kapak görseli güncellendi!", KYToastType.SUCCESS))
+            }
+        }
+    }
 
     // Yönet Modu & Yerinde Başlık Düzenleme State
     var isManageMode by remember { mutableStateOf(false) }
@@ -255,9 +278,7 @@ fun CatalogDetailScreen(
         }
     }
 
-    val effectiveCoverUrl = catalog.coverImageUrl.ifBlank {
-        catalogProducts.firstOrNull()?.imageUrl.orEmpty()
-    }
+    val effectiveCoverUrl = catalog.coverImageUrl.ifBlank { store.logoUri.ifBlank { catalogProducts.firstOrNull()?.imageUrl.orEmpty() } }
 
     Box(
         modifier = modifier
@@ -331,6 +352,11 @@ fun CatalogDetailScreen(
                                     )
                                 )
                             }
+                        },
+                        onUpdateCover = {
+                            coverLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            )
                         },
                         onBackClick = onBackClick
                     )
@@ -949,6 +975,7 @@ private fun CatalogDetailHeroHeader(
     onSaveTitle: () -> Unit,
     onCancelEditTitle: () -> Unit,
     onToggleVisibility: () -> Unit,
+    onUpdateCover: () -> Unit,
     onBackClick: () -> Unit
 ) {
     Surface(
@@ -963,6 +990,7 @@ private fun CatalogDetailHeroHeader(
                     .fillMaxWidth()
                     .aspectRatio(1.9f)
                     .background(SurfaceMuted)
+                    .clickable { onUpdateCover() }
             ) {
                 AsyncImage(
                     model = coverUrl,

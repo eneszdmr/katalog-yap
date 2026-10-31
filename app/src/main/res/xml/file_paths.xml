@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <cache-path name="shared_files" path="shared_files/" />
+    <cache-path name="shared_exports" path="shared_exports/" />
+    <cache-path name="root_cache" path="." />
     <files-path name="product_images" path="product_images/" />
+    <files-path name="root_files" path="." />
+    <external-path name="external_files" path="." />
 </paths>

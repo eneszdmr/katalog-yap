@@ -319,6 +319,7 @@ fun PublicOrderFormBottomSheet(
                 placeholder = TrStrings.PublicCatalog.PLACEHOLDER_PHONE,
                 leadingIcon = Icons.Outlined.Phone,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                visualTransformation = com.example.util.PhoneVisualTransformation(),
                 errorText = phoneError,
                 tag = "input_order_customer_phone"
             )

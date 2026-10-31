@@ -1089,7 +1089,12 @@ fun SettingsDraftScreen(
                         Spacer(modifier = Modifier.height(10.dp))
 
                         resellers.take(3).forEach { reseller ->
-                            val resellerLink = "https://katalogyap.app/c/${reseller.shortCode}"
+                            val primaryCatSlug = catalogs
+                                .firstOrNull { it.id in reseller.visibleCatalogIds && it.isActive }
+                                ?.let { it.slug.ifBlank { it.id } }
+                                ?: catalogs.firstOrNull { it.isActive }?.let { it.slug.ifBlank { it.id } }
+                                ?: reseller.shortCode
+                            val resellerLink = "https://constantinopolishotel.store/?c=$primaryCatSlug&bayi=${reseller.shortCode}"
                             val resellerOrderCount = resellerOrders.count {
                                 it.resellerId == reseller.id || it.resellerName.equals(reseller.name, ignoreCase = true)
                             }

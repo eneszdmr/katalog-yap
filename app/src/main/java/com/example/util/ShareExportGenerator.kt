@@ -12,7 +12,11 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
+import android.content.ContentValues
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import androidx.core.content.FileProvider
 import com.example.model.Catalog
 import com.example.model.Product
@@ -22,7 +26,9 @@ import com.example.model.WatermarkPosition
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -52,13 +58,50 @@ object ShareExportGenerator {
         return "/$prefix/$code"
     }
 
-    fun generateFullShortUrl(shortPath: String, settings: ShareSettings): String {
-        val base = "https://katalogyap.app$shortPath"
+    const val WEB_BASE_URL = "https://constantinopolishotel.store"
+
+    fun normalizeTurkishSlug(raw: String): String {
+        return raw.trim()
+            .replace("İ", "i")
+            .replace("I", "i")
+            .replace("ı", "i")
+            .replace("Ş", "s")
+            .replace("ş", "s")
+            .replace("Ğ", "g")
+            .replace("ğ", "g")
+            .replace("Ü", "u")
+            .replace("ü", "u")
+            .replace("Ö", "o")
+            .replace("ö", "o")
+            .replace("Ç", "c")
+            .replace("ç", "c")
+            .lowercase(Locale.ROOT)
+            .replace(Regex("[^a-z0-9_-]+"), "-")
+            .trim('-')
+    }
+
+    fun generateFullShortUrl(
+        shortPath: String,
+        settings: ShareSettings,
+        catalogSlugOrId: String = ""
+    ): String {
+        val rawKey = catalogSlugOrId.trim()
+            .ifBlank {
+                shortPath.removePrefix("/?c=")
+                    .removePrefix("?c=")
+                    .removePrefix("/c/klk/")
+                    .removePrefix("/c/")
+                    .removePrefix("/p/")
+                    .trim('/')
+            }
+        val cleanKey = normalizeTurkishSlug(rawKey).ifBlank { "katalog" }
+
+        val base = "$WEB_BASE_URL/?c=$cleanKey"
         val params = mutableListOf<String>()
         if (!settings.showPrices) params.add("p=0")
         if (settings.isDealerShare) params.add("b=1")
         if (settings.hasPassword && settings.password.isNotBlank()) params.add("lock=1")
-        return if (params.isEmpty()) base else "$base?${params.joinToString("&")}"
+        return if (params.isEmpty()) base else "$base&${params.joinToString("&")}"
     }
 
     /**
@@ -329,9 +372,8 @@ object ShareExportGenerator {
             val dir = File(context.cacheDir, "shared_files").apply {
                 if (!exists()) mkdirs()
             }
-            val safeName = catalogTitle.lowercase()
-                .replace(Regex("[^a-z0-9]+"), "_")
-                .trim('_')
+            val safeName = normalizeTurkishSlug(catalogTitle)
+                .replace("-", "_")
                 .ifBlank { "katalog_brosur" }
             val outFile = File(dir, "${safeName}_brosur.pdf")
             FileOutputStream(outFile).use { out ->
@@ -339,6 +381,7 @@ object ShareExportGenerator {
                 out.flush()
             }
             pdfDocument.close()
+            savePdfToPublicDownloads(context, outFile, "${safeName}_brosur.pdf")
             outFile
         }.getOrNull()
     }
@@ -510,6 +553,79 @@ object ShareExportGenerator {
             }.getOrNull()
         }
 
+    fun savePdfToPublicDownloads(
+        context: Context,
+        sourcePdfFile: File,
+        displayFileName: String
+    ): Uri? {
+        return runCatching {
+            val cleanFileName = if (displayFileName.endsWith(".pdf", ignoreCase = true)) {
+                displayFileName
+            } else {
+                "$displayFileName.pdf"
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val resolver = context.contentResolver
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, cleanFileName)
+                    put(MediaStore.Downloads.MIME_TYPE, "application/pdf")
+                    put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/KatalogYap")
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                if (uri != null) {
+                    resolver.openOutputStream(uri)?.use { out ->
+                        FileInputStream(sourcePdfFile).use { input ->
+                            input.copyTo(out)
+                        }
+                    }
+                    values.clear()
+                    values.put(MediaStore.Downloads.IS_PENDING, 0)
+                    resolver.update(uri, values, null, null)
+                }
+                uri
+            } else {
+                val downloadsDir = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    "KatalogYap"
+                ).apply { mkdirs() }
+                val destFile = File(downloadsDir, cleanFileName)
+                sourcePdfFile.copyTo(destFile, overwrite = true)
+                FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", destFile)
+            }
+        }.getOrNull()
+    }
+
+    fun openPdfFile(
+        context: Context,
+        file: File,
+        chooserTitle: String = "PDF Görüntüle"
+    ): Boolean {
+        return runCatching {
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                file
+            )
+            val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/pdf")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(Intent.createChooser(viewIntent, chooserTitle).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+            true
+        }.getOrElse {
+            shareFileViaSystemSheet(
+                context = context,
+                file = file,
+                mimeType = "application/pdf",
+                chooserTitle = chooserTitle
+            )
+            false
+        }
+    }
+
     fun shareFileViaSystemSheet(
         context: Context,
         file: File,
@@ -531,7 +647,9 @@ object ShareExportGenerator {
                 }
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            context.startActivity(Intent.createChooser(sendIntent, chooserTitle))
+            context.startActivity(Intent.createChooser(sendIntent, chooserTitle).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
         }
     }
 }

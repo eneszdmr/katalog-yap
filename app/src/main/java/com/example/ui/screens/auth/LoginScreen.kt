@@ -547,16 +547,7 @@ fun LoginScreen(
                 tag = "btn_open_firebase_reset_sheet"
             )
 
-            if (onOpenPublicCatalog != null) {
-                Spacer(modifier = Modifier.height(6.dp))
-                KYButton(
-                    text = "Herkese Açık Katalog Önizle (/c/cat-1)",
-                    onClick = { onOpenPublicCatalog("cat-1") },
-                    variant = ButtonVariant.GHOST,
-                    modifier = Modifier.fillMaxWidth(),
-                    tag = "btn_login_public_catalog_demo"
-                )
-            }
+
         }
 
         Spacer(modifier = Modifier.height(20.dp))

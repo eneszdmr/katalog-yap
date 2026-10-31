@@ -131,6 +131,7 @@ fun CatalogsDraftScreen(
     val catalogs by dataService.catalogs.collectAsState()
     val products by dataService.products.collectAsState()
     val notifications by dataService.notifications.collectAsState()
+    val liveViewersByCatalog by dataService.liveViewersByCatalog.collectAsState()
 
     val lowStockThreshold = store.lowStockThreshold.coerceAtLeast(1)
     val lowStockProducts = remember(products, lowStockThreshold) {
@@ -501,7 +502,8 @@ fun CatalogsDraftScreen(
                             },
                             onDeleteClick = {
                                 deletingCatalogIds = setOf(catalog.id)
-                            }
+                            },
+                            liveViewersCount = liveViewersByCatalog[catalog.id] ?: 0
                         )
                     }
                 }
@@ -643,11 +645,23 @@ fun CatalogsDraftScreen(
                 if (target == null) {
                     val newId = UUID.randomUUID().toString()
                     val tags = if (tag.isNotBlank()) listOf(tag) else listOf("Yeni Sezon")
+                    val cleanSlug = title
+                        .replace("İ", "i").replace("I", "i")
+                        .replace("Ş", "s").replace("Ğ", "g")
+                        .replace("Ü", "u").replace("Ö", "o").replace("Ç", "c")
+                        .lowercase(java.util.Locale.ROOT)
+                        .replace("i\u0307", "i")
+                        .replace("ş", "s").replace("ğ", "g")
+                        .replace("ü", "u").replace("ö", "o")
+                        .replace("ç", "c").replace("ı", "i")
+                        .replace(Regex("[^a-z0-9]+"), "-")
+                        .trim('-')
+                        .ifBlank { "katalog-${newId.take(6)}" }
                     val newCat = Catalog(
                         id = newId,
                         title = title,
                         description = description,
-                        slug = title.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-'),
+                        slug = cleanSlug,
                         coverImageUrl = "https://picsum.photos/seed/$newId/600/600",
                         tags = tags,
                         isActive = true,

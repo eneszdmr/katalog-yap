@@ -1,5 +1,8 @@
 package com.example.ui.screens.orders
 
+import com.example.model.Product
+
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -115,6 +118,7 @@ fun OrderDetailScreen(
     val store = authContext.storeSettings
 
     val orders by dataService.orders.collectAsState()
+    val allProducts by dataService.products.collectAsState()
     val order = remember(orders, orderId) {
         orders.find { it.id == orderId || it.orderNumber.equals(orderId, ignoreCase = true) }
     }
@@ -122,6 +126,8 @@ fun OrderDetailScreen(
     var showStatusDropdown by remember { mutableStateOf(false) }
     var showCancelConfirmModal by remember { mutableStateOf(false) }
     var isGeneratingInvoice by remember { mutableStateOf(false) }
+    var downloadedInvoiceFile by remember { mutableStateOf<java.io.File?>(null) }
+    var downloadedInvoicePath by remember { mutableStateOf("") }
 
     if (order == null) {
         Box(
@@ -378,7 +384,7 @@ fun OrderDetailScreen(
 
             // 2) SİPARİŞ EDİLEN ÜRÜN LİSTESİ (Görsel, Ad, Varyant, Adet, Fiyat) + TOPLAM
             item {
-                OrderProductsCard(order = order)
+                OrderProductsCard(order = order, products = allProducts)
             }
 
             // 3) MÜŞTERİ BİLGİLERİ, ADRES VE NOT
@@ -437,16 +443,14 @@ fun OrderDetailScreen(
                                     )
                                     isGeneratingInvoice = false
                                     if (pdfFile != null) {
+                                        val displayPath = OrderInvoiceHelper.getSavedDisplayPath(order)
+                                        downloadedInvoicePath = displayPath
+                                        downloadedInvoiceFile = pdfFile
                                         onShowToast(
                                             KYToastData(
-                                                message = "${TrStrings.Orders.TOAST_INVOICE_DOWNLOADED} (${pdfFile.name})",
+                                                message = "$displayPath konumuna kaydedildi",
                                                 type = KYToastType.SUCCESS
                                             )
-                                        )
-                                        OrderInvoiceHelper.shareInvoicePdf(
-                                            context = context,
-                                            file = pdfFile,
-                                            order = order
                                         )
                                     }
                                 }
@@ -535,10 +539,37 @@ fun OrderDetailScreen(
         },
         onDismiss = { showCancelConfirmModal = false }
     )
+
+    val activeInvoiceFile = downloadedInvoiceFile
+    if (activeInvoiceFile != null) {
+        OrderInvoicePreviewDialog(
+            order = order,
+            store = store,
+            savedDisplayPath = downloadedInvoicePath,
+            onDismiss = { downloadedInvoiceFile = null },
+            onOpenPdfViewer = {
+                OrderInvoiceHelper.openInvoicePdf(
+                    context = context,
+                    file = activeInvoiceFile,
+                    order = order
+                )
+            },
+            onSharePdf = {
+                OrderInvoiceHelper.shareInvoicePdf(
+                    context = context,
+                    file = activeInvoiceFile,
+                    order = order
+                )
+            }
+        )
+    }
 }
 
 @Composable
-private fun OrderProductsCard(order: Order) {
+private fun OrderProductsCard(
+    order: Order,
+    products: List<Product> = emptyList()
+) {
     val totalItemQuantity = order.items.sumOf { it.quantity }
     KYCard(tag = "order_products_card") {
         Row(
@@ -565,7 +596,8 @@ private fun OrderProductsCard(order: Order) {
                 OrderProductRowItem(
                     item = item,
                     currency = order.currency,
-                    index = idx
+                    index = idx,
+                    products = products
                 )
                 if (idx < order.items.lastIndex) {
                     HorizontalDivider(color = SurfaceMuted)
@@ -606,11 +638,20 @@ private fun OrderProductsCard(order: Order) {
 private fun OrderProductRowItem(
     item: OrderItem,
     currency: String,
-    index: Int
+    index: Int,
+    products: List<Product> = emptyList()
 ) {
     val lineTotal = (item.unitPrice * item.quantity).roundToInt()
-    val effectiveImg = item.imageUrl.ifBlank {
-        "https://picsum.photos/seed/${item.productId.ifBlank { "prod-$index" }}/300/300"
+    val matched = remember(item, products) {
+        products.find { it.id == item.productId || it.name.trim().equals(item.productName.trim(), ignoreCase = true) }
+    }
+    val effectiveImg = remember(item, matched) {
+        when {
+            !matched?.imageUrl.isNullOrBlank() -> matched!!.imageUrl
+            item.imageUrl.isNotBlank() && !item.imageUrl.contains("picsum.photos/seed/") -> item.imageUrl
+            !matched?.galleryUrls.isNullOrEmpty() -> matched!!.galleryUrls.first()
+            else -> item.imageUrl.takeIf { !it.contains("picsum.photos/seed/") }.orEmpty()
+        }
     }
 
     Row(
@@ -619,15 +660,32 @@ private fun OrderProductRowItem(
             .testTag("order_product_row_$index"),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        AsyncImage(
-            model = effectiveImg,
-            contentDescription = item.productName,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier
-                .size(64.dp)
-                .clip(ButtonRoundedXl)
-                .background(SurfaceMuted)
-        )
+        if (effectiveImg.isNotBlank()) {
+            AsyncImage(
+                model = effectiveImg,
+                contentDescription = item.productName,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(64.dp)
+                    .clip(ButtonRoundedXl)
+                    .background(SurfaceMuted)
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .size(64.dp)
+                    .clip(ButtonRoundedXl)
+                    .background(SurfaceMuted),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Inventory2,
+                    contentDescription = item.productName,
+                    tint = TextSecondary,
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+        }
 
         Spacer(modifier = Modifier.width(12.dp))
 

@@ -10,20 +10,33 @@ import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Cancel
 import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.FiberNew
+import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.LocalShipping
+import androidx.compose.material.icons.outlined.PictureAsPdf
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Verified
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -35,16 +48,27 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.example.model.Order
 import com.example.model.OrderStatus
 import com.example.model.StoreSettings
+import com.example.ui.components.ButtonVariant
+import com.example.ui.components.KYButton
 import com.example.ui.theme.BadgeRoundedPill
+import com.example.ui.theme.BorderLight
+import com.example.ui.theme.ButtonRoundedXl
+import com.example.ui.theme.CardRounded2xl
 import com.example.ui.theme.DangerRed
 import com.example.ui.theme.DangerRedLight
 import com.example.ui.theme.PrimaryBlue
 import com.example.ui.theme.PrimaryBlueSubtle
 import com.example.ui.theme.SuccessGreen
 import com.example.ui.theme.SuccessGreenLight
+import com.example.ui.theme.SurfaceMuted
+import com.example.ui.theme.SurfaceWhite
+import com.example.ui.theme.TextPrimary
+import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.WarningAmberDark
 import com.example.ui.theme.AccentAmberLight
 import com.example.util.ShareExportGenerator
@@ -349,14 +373,34 @@ object OrderInvoiceHelper {
             pdfDocument.finishPage(page)
 
             val exportDir = File(context.cacheDir, "shared_exports").apply { mkdirs() }
-            val cleanNo = order.orderNumber.replace("[^A-Za-z0-9]".toRegex(), "").lowercase()
-            val outFile = File(exportDir, "siparis_fisi_${cleanNo}.pdf")
+            val cleanNo = order.orderNumber.replace("[^A-Za-z0-9]".toRegex(), "").ifBlank { "1001" }
+            val fileName = "Siparis_Fisi_${cleanNo}.pdf"
+            val outFile = File(exportDir, fileName)
             FileOutputStream(outFile).use { out ->
                 pdfDocument.writeTo(out)
+                out.flush()
             }
             pdfDocument.close()
+            ShareExportGenerator.savePdfToPublicDownloads(
+                context = context,
+                sourcePdfFile = outFile,
+                displayFileName = fileName
+            )
             outFile
         }.getOrNull()
+    }
+
+    fun getSavedDisplayPath(order: Order): String {
+        val cleanNo = order.orderNumber.replace("[^A-Za-z0-9]".toRegex(), "").ifBlank { "1001" }
+        return "İndirilenler/KatalogYap/Siparis_Fisi_${cleanNo}.pdf"
+    }
+
+    fun openInvoicePdf(context: Context, file: File, order: Order): Boolean {
+        return ShareExportGenerator.openPdfFile(
+            context = context,
+            file = file,
+            chooserTitle = "${order.orderNumber} Sipariş Fişi / Fatura"
+        )
     }
 
     fun shareInvoicePdf(context: Context, file: File, order: Order) {
@@ -367,5 +411,245 @@ object OrderInvoiceHelper {
             chooserTitle = "${order.orderNumber} Sipariş Fişi / Fatura",
             extraText = "${order.orderNumber} numaralı sipariş fişi (${order.customerName})"
         )
+    }
+}
+
+@Composable
+fun OrderInvoicePreviewDialog(
+    order: Order,
+    store: StoreSettings,
+    savedDisplayPath: String,
+    onDismiss: () -> Unit,
+    onOpenPdfViewer: () -> Unit,
+    onSharePdf: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            shape = CardRounded2xl,
+            color = SurfaceWhite,
+            border = BorderStroke(1.dp, BorderLight),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 24.dp)
+                .testTag("order_invoice_preview_dialog")
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 640.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // Başlık ve Kapat Butonu
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Outlined.PictureAsPdf,
+                            contentDescription = null,
+                            tint = PrimaryBlue,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column {
+                            Text(
+                                text = "Sipariş Fişi / Fatura Hazır",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                color = TextPrimary
+                            )
+                            Text(
+                                text = "${order.orderNumber} • ${formatOrderDateTr(order.createdAt)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
+                            )
+                        }
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            imageVector = Icons.Outlined.Close,
+                            contentDescription = "Kapat",
+                            tint = TextSecondary
+                        )
+                    }
+                }
+
+                // Kaydedilen Konum Bildirim Kutusu
+                Surface(
+                    shape = ButtonRoundedXl,
+                    color = SuccessGreenLight,
+                    border = BorderStroke(1.dp, SuccessGreen.copy(alpha = 0.35f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.CheckCircle,
+                            contentDescription = null,
+                            tint = SuccessGreen,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Cihazınıza PDF Olarak Kaydedildi",
+                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                color = SuccessGreen
+                            )
+                            Text(
+                                text = "Konum: $savedDisplayPath",
+                                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                                color = TextPrimary
+                            )
+                        }
+                    }
+                }
+
+                // Görsel Fatura / Fiş Önizleme Kartı
+                Surface(
+                    shape = ButtonRoundedXl,
+                    color = SurfaceMuted,
+                    border = BorderStroke(1.dp, BorderLight),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        // Mağaza Başlığı
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(PrimaryBlue, ButtonRoundedXl)
+                                .padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = store.businessName.ifBlank { "KATALOG YAP MAĞAZA" },
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold),
+                                    color = SurfaceWhite
+                                )
+                                Text(
+                                    text = "SİPARİŞ BİLGİ FİŞİ / PROFORMA FATURA",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = SurfaceWhite.copy(alpha = 0.85f)
+                                )
+                            }
+                            Text(
+                                text = order.orderNumber,
+                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                color = SurfaceWhite
+                            )
+                        }
+
+                        // Müşteri Bilgileri
+                        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(
+                                text = "MÜŞTERİ & TESLİMAT",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = PrimaryBlue
+                            )
+                            Text(
+                                text = "${order.customerName} • ${order.customerPhone}",
+                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                                color = TextPrimary
+                            )
+                            if (order.customerAddress.isNotBlank()) {
+                                Text(
+                                    text = order.customerAddress,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+
+                        HorizontalDivider(color = BorderLight)
+
+                        // Ürün Kalemleri
+                        Text(
+                            text = "SİPARİŞ KALEMLERİ (${order.items.sumOf { it.quantity }} Adet)",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = PrimaryBlue
+                        )
+                        order.items.forEach { item ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "${item.quantity}x ${item.productName}",
+                                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                                        color = TextPrimary
+                                    )
+                                    if (item.selectedVariantSummary.isNotBlank()) {
+                                        Text(
+                                            text = item.selectedVariantSummary,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = TextSecondary
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = "${(item.unitPrice * item.quantity).roundToInt()} ${order.currency}",
+                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                                    color = TextPrimary
+                                )
+                            }
+                        }
+
+                        HorizontalDivider(color = BorderLight)
+
+                        // Genel Toplam
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "GENEL TOPLAM",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = TextPrimary
+                            )
+                            Text(
+                                text = "${order.totalAmount.roundToInt()} ${order.currency}",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                color = PrimaryBlue
+                            )
+                        }
+                    }
+                }
+
+                // Aksiyon Butonları
+                KYButton(
+                    text = "PDF Okuyucu ile Aç",
+                    onClick = onOpenPdfViewer,
+                    variant = ButtonVariant.PRIMARY,
+                    leadingIcon = Icons.Outlined.FolderOpen,
+                    modifier = Modifier.fillMaxWidth(),
+                    tag = "btn_invoice_open_pdf_viewer"
+                )
+
+                KYButton(
+                    text = "WhatsApp / Diğer Uygulamalarla Paylaş",
+                    onClick = onSharePdf,
+                    variant = ButtonVariant.SECONDARY,
+                    leadingIcon = Icons.Outlined.Share,
+                    modifier = Modifier.fillMaxWidth(),
+                    tag = "btn_invoice_share_pdf"
+                )
+            }
+        }
     }
 }

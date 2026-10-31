@@ -86,7 +86,7 @@ data class Product(
     val catalogId: String,
     val name: String,
     val description: String,
-    val price: Double,
+    val price: Double = 0.0,
     val originalPrice: Double? = null, // İndirimliyse üstü çizili eski fiyat
     val currency: String = "₺",
     val imageUrl: String = "",
@@ -225,39 +225,33 @@ enum class SubscriptionPlan(
     val badgeTr: String
 ) {
     FREE(
-        titleTr = "Ücretsiz",
-        periodLabelTr = "Başlangıç",
-        priceLabelTr = "0 ₺ / ay",
-        maxCatalogs = 2,
-        maxProducts = 50,
-        badgeTr = "Başlangıç"
-    ),
-    LITE_MONTHLY(
-        titleTr = "Lite (Aylık)",
-        periodLabelTr = "Aylık Plan",
-        priceLabelTr = "299 ₺ / ay",
-        maxCatalogs = 10,
-        maxProducts = 500,
-        badgeTr = "Popüler"
-    ),
-    PREMIUM_YEARLY(
-        titleTr = "Premium (Yıllık)",
-        periodLabelTr = "Yıllık Avantajlı",
-        priceLabelTr = "2.490 ₺ / yıl",
+        titleTr = "Tamamen Ücretsiz",
+        periodLabelTr = "Sınırsız Paket",
+        priceLabelTr = "Ücretsiz",
         maxCatalogs = null,
         maxProducts = null,
-        badgeTr = "En Avantajlı"
+        badgeTr = "Aktif • Sınırsız"
+    ),
+    LITE_MONTHLY(
+        titleTr = "Tamamen Ücretsiz",
+        periodLabelTr = "Sınırsız Paket",
+        priceLabelTr = "Ücretsiz",
+        maxCatalogs = null,
+        maxProducts = null,
+        badgeTr = "Ücretsiz"
+    ),
+    PREMIUM_YEARLY(
+        titleTr = "Tamamen Ücretsiz",
+        periodLabelTr = "Sınırsız Paket",
+        priceLabelTr = "Ücretsiz",
+        maxCatalogs = null,
+        maxProducts = null,
+        badgeTr = "Ücretsiz"
     );
 
-    fun isCatalogLimitExceeded(currentCatalogCount: Int): Boolean {
-        val limit = maxCatalogs ?: return false
-        return currentCatalogCount >= limit
-    }
+    fun isCatalogLimitExceeded(currentCatalogCount: Int): Boolean = false
 
-    fun isProductLimitExceeded(currentProductCount: Int): Boolean {
-        val limit = maxProducts ?: return false
-        return currentProductCount >= limit
-    }
+    fun isProductLimitExceeded(currentProductCount: Int): Boolean = false
 }
 
 fun defaultStoreTeamMembers(): List<TeamMember> = listOf(
@@ -296,7 +290,7 @@ data class StoreSettings(
     val city: String = "İstanbul",
     val businessAddress: String = "Bağdat Cad. Suadiye Mah. No: 142/B Kadıköy / İstanbul",
     val instagramUrl: String = "instagram.com/veratasarimbutik",
-    val websiteUrl: String = "https://veratasarim.com",
+    val websiteUrl: String = "https://constantinopolishotel.store",
     val facebookUrl: String = "facebook.com/veratasarimbutik",
     // 2) Mağaza Ayarları
     val currencyCode: String = CurrencyOption.TRY.code,
@@ -322,7 +316,58 @@ data class StoreSettings(
     val lowStockThreshold: Int = 5,
     val subscriptionPlan: SubscriptionPlan = SubscriptionPlan.FREE,
     val teamMembers: List<TeamMember> = defaultStoreTeamMembers()
-)
+) {
+    companion object {
+        fun emptyForNewUser(
+            phoneWhatsapp: String = "",
+            ownerName: String = "",
+            ownerContact: String = ""
+        ): StoreSettings {
+            val cleanOwnerName = ownerName.trim().ifBlank { "Mağaza Sahibi (Siz)" }
+            val cleanContact = ownerContact.trim().ifBlank { phoneWhatsapp.trim() }
+            return StoreSettings(
+                businessName = "",
+                businessType = BusinessType.CLOTHING.labelTr,
+                logoUri = "",
+                phoneWhatsapp = phoneWhatsapp,
+                city = "",
+                businessAddress = "",
+                instagramUrl = "",
+                websiteUrl = "https://constantinopolishotel.store",
+                facebookUrl = "",
+                currencyCode = CurrencyOption.TRY.code,
+                currencySymbol = CurrencyOption.TRY.symbol,
+                catalogLanguage = CatalogLanguage.TR.labelTr,
+                customSlug = "",
+                vatRatePercent = 20,
+                showVatInPrices = true,
+                minOrderAmount = 0.0,
+                shippingFee = 0.0,
+                orderConfirmationTemplate = "Merhaba {musteri_adi}, {siparis_no} numaralı {toplam_tutar} tutarındaki siparişiniz başarıyla alınmıştır. Hazırlandığında kargo bilgisi paylaşılacaktır.",
+                catalogThemeColorHex = "#2563EB",
+                catalogGridColumns = 2,
+                catalogShowPrices = true,
+                protectImagesFromSaving = false,
+                notificationsEnabled = true,
+                notifyNewOrder = true,
+                notifyLowStock = true,
+                notifyWeeklySummary = true,
+                lowStockThreshold = 5,
+                subscriptionPlan = SubscriptionPlan.FREE,
+                teamMembers = listOf(
+                    TeamMember(
+                        id = "team-owner-1",
+                        name = cleanOwnerName,
+                        emailOrPhone = cleanContact,
+                        role = TeamRole.ADMIN,
+                        isOwner = true,
+                        statusText = "İşletme Sahibi"
+                    )
+                )
+            )
+        }
+    }
+}
 
 data class AppNotification(
     val id: String,

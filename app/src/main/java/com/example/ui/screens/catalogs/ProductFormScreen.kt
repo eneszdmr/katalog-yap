@@ -358,24 +358,18 @@ fun ProductFormScreen(
             nameError = null
         }
 
-        if (parsedRegularPrice == null || parsedRegularPrice <= 0.0) {
-            priceError = TrStrings.ProductForm.ERROR_PRICE_REQUIRED
-            hasError = true
-        } else {
-            priceError = null
-        }
+        // Price is optional, default to 0.0 if not provided
+        val rawPrice = parsedRegularPrice ?: 0.0
+        val rawDiscountPrice = parsedDiscountPrice ?: 0.0
 
-        if (hasError || parsedRegularPrice == null) return
-
-        // İndirimli fiyat girilmişse ve normal fiyattan düşükse:
-        // effectivePrice = indirimli fiyat, originalPrice = normal fiyat
         val effectivePrice: Double
         val effectiveOriginalPrice: Double?
-        if (parsedDiscountPrice != null && parsedDiscountPrice > 0.0 && parsedDiscountPrice < parsedRegularPrice) {
-            effectivePrice = parsedDiscountPrice
-            effectiveOriginalPrice = parsedRegularPrice
+
+        if (rawDiscountPrice > 0.0 && rawDiscountPrice < rawPrice) {
+            effectivePrice = rawDiscountPrice
+            effectiveOriginalPrice = rawPrice
         } else {
-            effectivePrice = parsedRegularPrice
+            effectivePrice = rawPrice
             effectiveOriginalPrice = null
         }
 

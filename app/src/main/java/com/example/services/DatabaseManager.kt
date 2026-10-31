@@ -46,8 +46,8 @@ data class MariaDbConfig(
     val sslEnabled: Boolean = false,
     val maxPoolSize: Int = 8,
     val minIdle: Int = 2,
-    val connectTimeoutMs: Int = 8_000,
-    val socketTimeoutMs: Int = 20_000,
+    val connectTimeoutMs: Int = 4_500,
+    val socketTimeoutMs: Int = 12_000,
     val idleTimeoutMs: Long = 180_000L,
     val maxLifetimeMs: Long = 900_000L,
     val validationIntervalMs: Long = 15_000L
@@ -73,6 +73,11 @@ data class MariaDbConfig(
             append("&connectTimeout=").append(connectTimeoutMs)
             append("&socketTimeout=").append(socketTimeoutMs)
             append("&rewriteBatchedStatements=true")
+            append("&useCompression=true")
+            append("&cachePrepStmts=true")
+            append("&prepStmtCacheSize=250")
+            append("&prepStmtCacheSqlLimit=2048")
+            append("&useServerPrepStmts=false")
             append("&tcpKeepAlive=true")
             append("&autoReconnect=false")
             append("&useSSL=").append(sslEnabled)
@@ -475,11 +480,12 @@ object DatabaseManager {
 
     private fun wrapWithPoolProxy(holder: PooledConnectionHolder): Connection {
         val closedFlag = AtomicBoolean(false)
+        val taintedFlag = AtomicBoolean(false)
         val handler = InvocationHandler { proxy, method: Method, args: Array<out Any?>? ->
             when (method.name) {
                 "close" -> {
                     if (closedFlag.compareAndSet(false, true)) {
-                        releaseConnection(holder, discard = false)
+                        releaseConnection(holder, discard = taintedFlag.get())
                     }
                     null
                 }
@@ -499,9 +505,12 @@ object DatabaseManager {
                         }
                     } catch (ite: InvocationTargetException) {
                         val targetEx = ite.targetException
-                        if (targetEx is SQLException && isFatalConnectionError(targetEx)) {
-                            if (closedFlag.compareAndSet(false, true)) {
-                                releaseConnection(holder, discard = true)
+                        if (targetEx is SQLException) {
+                            taintedFlag.set(true)
+                            if (isFatalConnectionError(targetEx)) {
+                                if (closedFlag.compareAndSet(false, true)) {
+                                    releaseConnection(holder, discard = true)
+                                }
                             }
                         }
                         throw targetEx
@@ -529,7 +538,17 @@ object DatabaseManager {
             setProperty("tcpKeepAlive", "true")
             setProperty("useSSL", cfg.sslEnabled.toString())
         }
-        return DriverManager.getConnection(cfg.jdbcUrl, props)
+        val conn = DriverManager.getConnection(cfg.jdbcUrl, props)
+        runCatching {
+            conn.autoCommit = true
+            conn.createStatement().use { stmt ->
+                stmt.queryTimeout = 4
+                stmt.execute(
+                    "SET SESSION wait_timeout = 120, SESSION interactive_timeout = 120, SESSION innodb_lock_wait_timeout = 8"
+                )
+            }
+        }
+        return conn
     }
 
     private fun isConnectionValid(
@@ -616,9 +635,19 @@ object DatabaseManager {
             return buildConfigValue.trim()
         }
 
-        val host = resolveEnv("MARIADB_HOST", BuildConfig.MARIADB_HOST)
+        val rawHost = resolveEnv("MARIADB_HOST", BuildConfig.MARIADB_HOST)
+        val host = if (rawHost.isBlank() || rawHost == "YOUR_MARIADB_HOST") {
+            DEFAULT_MARIADB_HOST
+        } else {
+            rawHost
+        }
         val port = resolveEnv("MARIADB_PORT", BuildConfig.MARIADB_PORT).toIntOrNull() ?: 3306
-        val database = resolveEnv("MARIADB_DATABASE", BuildConfig.MARIADB_DATABASE)
+        val rawDb = resolveEnv("MARIADB_DATABASE", BuildConfig.MARIADB_DATABASE)
+        val database = if (rawDb.isBlank() || rawDb == "YOUR_MARIADB_DATABASE") {
+            DEFAULT_MARIADB_DATABASE
+        } else {
+            rawDb
+        }
         val user = resolveEnv("MARIADB_USER", BuildConfig.MARIADB_USER)
         val password = dotEnvFileOverrides["MARIADB_PASSWORD"]
             ?: runCatching { System.getenv("MARIADB_PASSWORD") }.getOrNull()
@@ -642,12 +671,12 @@ object DatabaseManager {
         val connectTimeoutMs = resolveEnv(
             "MARIADB_CONNECT_TIMEOUT_MS",
             BuildConfig.MARIADB_CONNECT_TIMEOUT_MS
-        ).toIntOrNull()?.coerceIn(2_000, 60_000) ?: 8_000
+        ).toIntOrNull()?.coerceIn(2_000, 60_000) ?: 4_500
 
         val socketTimeoutMs = resolveEnv(
             "MARIADB_SOCKET_TIMEOUT_MS",
             BuildConfig.MARIADB_SOCKET_TIMEOUT_MS
-        ).toIntOrNull()?.coerceIn(5_000, 120_000) ?: 20_000
+        ).toIntOrNull()?.coerceIn(4_000, 120_000) ?: 12_000
 
         return MariaDbConfig(
             host = host,
@@ -661,6 +690,18 @@ object DatabaseManager {
             connectTimeoutMs = connectTimeoutMs,
             socketTimeoutMs = socketTimeoutMs
         )
+    }
+
+    const val DEFAULT_MARIADB_HOST = "constantinopolishotel.store"
+    const val DEFAULT_MARIADB_DATABASE = "mar220aksesucom_katalog"
+    const val DEFAULT_WEB_BASE_URL = "https://constantinopolishotel.store"
+
+    fun getWebBaseUrl(): String {
+        val fromDotEnv = dotEnvFileOverrides["CATALOG_WEB_BASE_URL"]?.trim()?.trimEnd('/')
+        if (!fromDotEnv.isNullOrBlank()) return fromDotEnv
+        val fromSysEnv = runCatching { System.getenv("CATALOG_WEB_BASE_URL")?.trim()?.trimEnd('/') }.getOrNull()
+        if (!fromSysEnv.isNullOrBlank()) return fromSysEnv
+        return DEFAULT_WEB_BASE_URL
     }
 
     private fun readDotEnvFromContext(context: Context): Map<String, String> {

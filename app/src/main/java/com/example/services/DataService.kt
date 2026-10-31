@@ -30,13 +30,16 @@ import com.example.model.defaultStoreTeamMembers
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
+import kotlin.math.max
 
 /**
  * Tüm veri erişimini tek bir katmanda toplayan DataService arayüzü.
@@ -54,7 +57,19 @@ interface DataService {
     val shareEvents: StateFlow<List<ShareEvent>>
     val catalogAnalyticsEvents: StateFlow<List<CatalogAnalyticsEvent>>
     val resellers: StateFlow<List<Reseller>>
+    val liveViewersByCatalog: StateFlow<Map<String, Int>>
+    val latestOrderAlert: StateFlow<Order?>
 
+    fun dismissLatestOrderAlert()
+    suspend fun activateUserAccountSession(
+        countryCode: String,
+        phoneNumber: String,
+        passwordHash: String = "",
+        recoveryEmail: String = "",
+        firebaseUid: String = "",
+        provider: String = "phone_password",
+        displayNameHint: String = ""
+    ): Pair<AuthUser, Boolean>
     suspend fun saveAuthUser(user: AuthUser?)
     suspend fun clearAuthSession()
     fun getPhoneCredential(fullPhone: String): PhonePasswordCredential?
@@ -137,14 +152,27 @@ interface DataService {
         productName: String,
         quantity: Int
     )
+    suspend fun recordLiveHeartbeat(
+        catalogId: String,
+        catalogSlug: String = "",
+        sessionId: String,
+        event: String = "heartbeat",
+        productId: String = "",
+        quantity: Int = 1
+    )
+    suspend fun refreshRemoteWebState()
+    suspend fun ensureCatalogPublishedAndSynced(catalogId: String)
+    suspend fun fetchRemotePublicCatalog(slugOrShortId: String): Pair<Catalog, List<Product>>?
     suspend fun seedSampleAnalyticsEvents()
     suspend fun resetStorage()
 }
 
 class LocalStorageDataService(context: Context) : DataService {
+    private val appContext: Context = context.applicationContext
     private val prefs: SharedPreferences =
-        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    private val mariaDbEngine = MariaDbStorageEngine(context.applicationContext)
+        appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val mariaDbEngine = MariaDbStorageEngine(appContext)
+    private val firestoreCatalogRepo by lazy { FirebaseRepository(appContext) }
     private val dbScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _authUser = MutableStateFlow<AuthUser?>(null)
@@ -178,131 +206,499 @@ class LocalStorageDataService(context: Context) : DataService {
     private val _resellers = MutableStateFlow<List<Reseller>>(emptyList())
     override val resellers: StateFlow<List<Reseller>> = _resellers.asStateFlow()
 
-    init {
-        loadFromLocalStorage()
-        syncWithMariaDbOnStartup()
+    private val _liveViewersByCatalog = MutableStateFlow<Map<String, Int>>(emptyMap())
+    override val liveViewersByCatalog: StateFlow<Map<String, Int>> = _liveViewersByCatalog.asStateFlow()
+
+    private val _latestOrderAlert = MutableStateFlow<Order?>(null)
+    override val latestOrderAlert: StateFlow<Order?> = _latestOrderAlert.asStateFlow()
+
+    override fun dismissLatestOrderAlert() {
+        _latestOrderAlert.value = null
     }
 
-    private fun syncWithMariaDbOnStartup() {
-        if (!mariaDbEngine.isConfigured()) return
+    private fun currentAccountKey(user: AuthUser? = _authUser.value): String {
+        if (user == null) return "default_store"
+        val normPhone = normalizePhoneKey(user.fullPhone.ifBlank { user.phoneNumber })
+        if (normPhone.isNotBlank()) return "store_$normPhone"
+        if (user.email.isNotBlank()) {
+            return "store_${slugify(user.email).take(24)}"
+        }
+        val cleanId = user.id.replace(Regex("[^a-zA-Z0-9_-]"), "").take(24)
+        return if (cleanId.isNotBlank()) "store_$cleanId" else "default_store"
+    }
+
+    private fun scopedKey(baseKey: String, accountKey: String = currentAccountKey()): String {
+        return if (accountKey == "default_store") baseKey else "${baseKey}_$accountKey"
+    }
+
+    init {
+        com.example.util.OrderNotificationHelper.ensureChannel(appContext)
+        loadFromLocalStorage()
+        syncWithMariaDbOnStartup()
+        startLiveWebSyncLoop()
+    }
+
+    private fun startLiveWebSyncLoop() {
         dbScope.launch {
-            val remoteSnapshots = mariaDbEngine.fetchAllSnapshots()
-            val restoredImages = mariaDbEngine.restoreBinaryImagesToLocalCache()
-
-            if (remoteSnapshots.isNotEmpty()) {
-                val editor = prefs.edit()
-                remoteSnapshots.forEach { (key, json) ->
-                    editor.putString(key, json)
-                }
-                editor.putBoolean(KEY_INITIAL_SEEDED, true)
-                editor.putBoolean(KEY_RESELLERS_SEEDED, true)
-                editor.putBoolean(KEY_ORDERS_SEEDED, true)
-                editor.putBoolean(KEY_ANALYTICS_SEEDED, true)
-                editor.apply()
-
-                _authUser.value = readAuthUser()
-                val loadedSettings = readSettings()
-                _settings.value = if (restoredImages.containsKey(loadedSettings.logoUri)) {
-                    loadedSettings.copy(logoUri = restoredImages.getValue(loadedSettings.logoUri))
-                } else {
-                    loadedSettings
-                }
-
-                val loadedCatalogs = readCatalogs().map { cat ->
-                    val mappedCover = restoredImages[cat.coverImageUrl] ?: cat.coverImageUrl
-                    cat.copy(coverImageUrl = mappedCover)
-                }
-                val loadedProducts = readProducts().map { prod ->
-                    val mappedMain = restoredImages[prod.imageUrl] ?: prod.imageUrl
-                    val mappedGallery = prod.galleryUrls.map { g -> restoredImages[g] ?: g }
-                    prod.copy(imageUrl = mappedMain, galleryUrls = mappedGallery)
-                }
-                _catalogs.value = loadedCatalogs
-                _products.value = loadedProducts
-                _resellers.value = readResellers()
-                _orders.value = readOrders()
-                _shareEvents.value = readShareEvents()
-                _catalogAnalyticsEvents.value = readCatalogAnalyticsEvents()
-                recalculateAnalytics()
-            } else {
-                // MariaDB henüz boşsa yerel verilerin ve resimlerin tamamını MariaDB'ye aktar
-                writeAuthUser(_authUser.value)
-                writePhoneCredentials(readPhoneCredentials().values.toList())
-                writeSettings(_settings.value)
-                writeCatalogs(_catalogs.value)
-                writeProducts(_products.value)
-                writeResellers(_resellers.value)
-                writeOrders(_orders.value)
-                writeShareEvents(_shareEvents.value)
-                writeCatalogAnalyticsEvents(_catalogAnalyticsEvents.value)
+            while (isActive) {
+                delay(20_000L)
+                runCatching { refreshRemoteWebState() }
             }
         }
     }
 
-    private fun loadFromLocalStorage() {
-        _authUser.value = readAuthUser()
-        _settings.value = readSettings()
+    private fun syncWithMariaDbOnStartup() {
+        dbScope.launch {
+            val activeBizId = currentAccountKey()
+            mariaDbEngine.activeBusinessId = activeBizId
+            val localCatalogsBefore = _catalogs.value
+            val localProductsBefore = _products.value
 
-        val hasSeeded = prefs.getBoolean(KEY_INITIAL_SEEDED, false)
-        val loadedCatalogs = readCatalogs()
-        val loadedProducts = readProducts()
+            if (mariaDbEngine.isConfigured()) {
+                val restoredImages = mariaDbEngine.restoreBinaryImagesToLocalCache()
+                val relationalCatalogs = mariaDbEngine.fetchAllRelationalCatalogs(activeBizId)
+                val relationalProducts = mariaDbEngine.fetchAllRelationalProducts(activeBizId)
 
-        if (!hasSeeded && loadedCatalogs.isEmpty()) {
-            val (sampleCatalogs, sampleProducts) = buildSampleCatalogsAndProducts()
-            _catalogs.value = sampleCatalogs
-            _products.value = sampleProducts
-            writeCatalogs(sampleCatalogs)
-            writeProducts(sampleProducts)
-            prefs.edit().putBoolean(KEY_INITIAL_SEEDED, true).apply()
-        } else {
-            _catalogs.value = loadedCatalogs
-            _products.value = loadedProducts
+                // Eğer aktif hesapta mağaza bilgisi varsa MariaDB'den logoyu ve mağaza bilgilerini de tazele
+                val normPhone = normalizePhoneKey(_authUser.value?.fullPhone.orEmpty())
+                val remoteBizSettings = mariaDbEngine.fetchBusinessSettingsByIdOrPhone(activeBizId, normPhone)
+                if (remoteBizSettings != null && _settings.value.businessName.isBlank()) {
+                    _settings.value = remoteBizSettings
+                    writeSettings(remoteBizSettings, activeBizId)
+                } else if (remoteBizSettings != null && _settings.value.logoUri.isBlank() && remoteBizSettings.logoUri.isNotBlank()) {
+                    val updatedWithLogo = _settings.value.copy(logoUri = remoteBizSettings.logoUri)
+                    _settings.value = updatedWithLogo
+                    writeSettings(updatedWithLogo, activeBizId)
+                }
+
+                // Yerelde telefonla oluşturulmuş katalog ve ürünleri ASLA ezme; uzak kayıtlarla ID bazlı birleştir
+                val mergedCatalogsMap = LinkedHashMap<String, Catalog>()
+                localCatalogsBefore.forEach { cat ->
+                    val mappedCover = restoredImages[cat.coverImageUrl] ?: cat.coverImageUrl
+                    mergedCatalogsMap[cat.id] = cat.copy(coverImageUrl = mappedCover)
+                }
+                relationalCatalogs.forEach { rCat ->
+                    val existing = mergedCatalogsMap[rCat.id]
+                    if (existing == null) {
+                        val mappedCover = restoredImages[rCat.coverImageUrl] ?: rCat.coverImageUrl
+                        mergedCatalogsMap[rCat.id] = rCat.copy(coverImageUrl = mappedCover)
+                    } else {
+                        mergedCatalogsMap[rCat.id] = existing.copy(
+                            viewCount = max(existing.viewCount, rCat.viewCount),
+                            orderCount = max(existing.orderCount, rCat.orderCount),
+                            coverImageUrl = existing.coverImageUrl.ifBlank { rCat.coverImageUrl }
+                        )
+                    }
+                }
+
+                val mergedProductsMap = LinkedHashMap<String, Product>()
+                localProductsBefore.forEach { prod ->
+                    val mappedMain = restoredImages[prod.imageUrl] ?: prod.imageUrl
+                    val mappedGallery = prod.galleryUrls.map { g -> restoredImages[g] ?: g }
+                    mergedProductsMap[prod.id] = prod.copy(imageUrl = mappedMain, galleryUrls = mappedGallery)
+                }
+                relationalProducts.forEach { rProd ->
+                    val existing = mergedProductsMap[rProd.id]
+                    if (existing == null) {
+                        val mappedMain = restoredImages[rProd.imageUrl] ?: rProd.imageUrl
+                        val mappedGallery = rProd.galleryUrls.map { g -> restoredImages[g] ?: g }
+                        mergedProductsMap[rProd.id] = rProd.copy(imageUrl = mappedMain, galleryUrls = mappedGallery)
+                    } else if (existing.imageUrl.isBlank() && rProd.imageUrl.isNotBlank()) {
+                        mergedProductsMap[rProd.id] = existing.copy(imageUrl = rProd.imageUrl)
+                    }
+                }
+
+                val finalProducts = mergedProductsMap.values.toList()
+                val finalCatalogs = mergedCatalogsMap.values.map { cat ->
+                    val count = finalProducts.count { it.catalogId == cat.id }
+                    val cover = cat.coverImageUrl.ifBlank {
+                        finalProducts.firstOrNull { it.catalogId == cat.id }?.imageUrl.orEmpty()
+                    }
+                    cat.copy(
+                        productCount = if (count > 0) count else cat.productCount,
+                        coverImageUrl = cover
+                    )
+                }
+
+                _catalogs.value = finalCatalogs
+                _products.value = finalProducts
+
+                if (_settings.value.businessName.isNotBlank()) {
+                    writeSettings(_settings.value, activeBizId)
+                }
+                writeCatalogs(finalCatalogs, activeBizId)
+                writeProducts(finalProducts, activeBizId)
+
+                finalCatalogs.filter { it.isActive }.forEach { cat ->
+                    val catProds = finalProducts.filter { it.catalogId == cat.id }
+                    runCatching {
+                        mariaDbEngine.publishCatalogWithProductsNow(cat, catProds, _settings.value, activeBizId)
+                    }
+                }
+
+                recalculateAnalytics()
+            }
+
+            runCatching {
+                firestoreCatalogRepo.migrateMariaDbCatalogsAndProducts(
+                    catalogs = _catalogs.value,
+                    products = _products.value,
+                    store = _settings.value
+                )
+            }
+
+            runCatching { refreshRemoteWebState() }
+        }
+    }
+
+    override suspend fun refreshRemoteWebState() {
+        val activeBizId = currentAccountKey()
+        val liveCounts = mariaDbEngine.fetchLiveViewerCounts(_catalogs.value)
+        _liveViewersByCatalog.value = liveCounts
+
+        if (!mariaDbEngine.isConfigured()) return
+
+        // 2) Web'den (constantinopolishotel.store/api.php) gelen yeni siparişleri birleştir
+        val ownedCatalogIds = _catalogs.value.map { it.id }.toSet()
+        val relationalOrders = mariaDbEngine.fetchRelationalOrders(activeBizId, ownedCatalogIds)
+        if (relationalOrders.isNotEmpty()) {
+            val enrichedRelational = enrichOrdersWithProductImages(relationalOrders, _products.value)
+            val localById = _orders.value.associateBy { it.id }
+            val newWebOrders = enrichedRelational.filter { it.id !in localById }
+            if (newWebOrders.isNotEmpty()) {
+                val mergedOrders = enrichOrdersWithProductImages(
+                    (newWebOrders + _orders.value).distinctBy { it.id }.sortedByDescending { it.createdAt },
+                    _products.value
+                )
+                _orders.value = mergedOrders
+                writeOrders(mergedOrders, activeBizId)
+
+                // Yeni web siparişi için hem uygulama içi hem de Android sistem bildirimi oluştur!
+                val newest = newWebOrders.first()
+                _latestOrderAlert.value = newest
+                if (_settings.value.notificationsEnabled && _settings.value.notifyNewOrder) {
+                    val notif = AppNotification(
+                        id = "notif-web-${newest.id}",
+                        title = "Web Katalogdan Yeni Sipariş: ${newest.orderNumber}",
+                        message = "${newest.customerName} (${newest.customerPhone}) constantinopolishotel.store üzerinden ${newest.totalAmount.toInt()} ${newest.currency} tutarında sipariş verdi.",
+                        timeAgo = "Şimdi",
+                        isUnread = true
+                    )
+                    _notifications.value = (listOf(notif) + _notifications.value).distinctBy { it.id }
+                    com.example.util.OrderNotificationHelper.showNewOrderNotification(
+                        context = appContext,
+                        order = newest,
+                        storeName = _settings.value.businessName
+                    )
+                }
+            }
         }
 
-        val loadedResellers = readResellers()
-        val hasResellersSeeded = prefs.getBoolean(KEY_RESELLERS_SEEDED, false)
-        if (!hasResellersSeeded && loadedResellers.isEmpty()) {
-            val sampleResellers = buildSampleResellers(_catalogs.value)
-            _resellers.value = sampleResellers
-            writeResellers(sampleResellers)
-            prefs.edit().putBoolean(KEY_RESELLERS_SEEDED, true).apply()
-        } else {
-            _resellers.value = loadedResellers
+        // 3) Web'den (visits tablosu) gelen yeni ziyaret / ürün inceleme / sepete ekleme olaylarını birleştir
+        val relationalVisits = mariaDbEngine.fetchRelationalVisits()
+        if (relationalVisits.isNotEmpty()) {
+            val localIds = _catalogAnalyticsEvents.value.map { it.id }.toSet()
+            val newVisits = relationalVisits.filter { it.id !in localIds }
+            if (newVisits.isNotEmpty()) {
+                val prodNameById = _products.value.associate { it.id to it.name }
+                val enrichedNewVisits = newVisits.map { ev ->
+                    if (ev.productName.isBlank() && ev.productId.isNotBlank()) {
+                        ev.copy(productName = prodNameById[ev.productId].orEmpty())
+                    } else {
+                        ev
+                    }
+                }
+                val mergedEvents = (enrichedNewVisits + _catalogAnalyticsEvents.value)
+                    .distinctBy { it.id }
+                    .sortedByDescending { it.createdAt }
+                    .take(1000)
+                _catalogAnalyticsEvents.value = mergedEvents
+                writeCatalogAnalyticsEvents(mergedEvents)
+            }
         }
 
-        val loadedOrders = readOrders()
-        val hasOrdersSeeded = prefs.getBoolean(KEY_ORDERS_SEEDED, false)
-        if (!hasOrdersSeeded && loadedOrders.isEmpty()) {
-            val sampleOrders = buildSampleOrders(_products.value, _catalogs.value)
-            _orders.value = sampleOrders
-            writeOrders(sampleOrders)
-            prefs.edit().putBoolean(KEY_ORDERS_SEEDED, true).apply()
-        } else {
-            _orders.value = loadedOrders
-        }
-
-        _shareEvents.value = readShareEvents()
-
-        val loadedAnalyticsEvents = readCatalogAnalyticsEvents()
-        val hasAnalyticsSeeded = prefs.getBoolean(KEY_ANALYTICS_SEEDED, false)
-        if (!hasAnalyticsSeeded && loadedAnalyticsEvents.isEmpty()) {
-            val sampleEvents = buildSampleAnalyticsEvents(_catalogs.value, _products.value)
-            _catalogAnalyticsEvents.value = sampleEvents
-            writeCatalogAnalyticsEvents(sampleEvents)
-            prefs.edit().putBoolean(KEY_ANALYTICS_SEEDED, true).apply()
-        } else {
-            _catalogAnalyticsEvents.value = loadedAnalyticsEvents
+        // 4) Katalog görüntülenme ve sipariş sayaçlarını güncelle
+        val remoteCounters = mariaDbEngine.fetchRelationalCatalogCounters()
+        if (remoteCounters.isNotEmpty()) {
+            var catalogsChanged = false
+            val updatedCats = _catalogs.value.map { cat ->
+                val remotePair = remoteCounters[cat.id]
+                if (remotePair != null) {
+                    val maxViews = max(cat.viewCount, remotePair.first)
+                    val maxOrders = max(cat.orderCount, remotePair.second)
+                    if (maxViews != cat.viewCount || maxOrders != cat.orderCount) {
+                        catalogsChanged = true
+                        cat.copy(viewCount = maxViews, orderCount = maxOrders)
+                    } else {
+                        cat
+                    }
+                } else {
+                    cat
+                }
+            }
+            if (catalogsChanged) {
+                _catalogs.value = updatedCats
+                writeCatalogs(updatedCats)
+            }
         }
 
         recalculateAnalytics()
     }
 
+    override suspend fun recordLiveHeartbeat(
+        catalogId: String,
+        catalogSlug: String,
+        sessionId: String,
+        event: String,
+        productId: String,
+        quantity: Int
+    ) {
+        val resolvedSlug = catalogSlug.ifBlank {
+            _catalogs.value.find { it.id == catalogId }?.slug.orEmpty()
+        }
+        mariaDbEngine.recordLiveSessionHeartbeatAsync(
+            catalogId = catalogId,
+            catalogSlug = resolvedSlug,
+            sessionId = sessionId,
+            event = event,
+            productId = productId,
+            quantity = quantity
+        )
+    }
+
+    private fun loadFromLocalStorage() {
+        val savedUser = readAuthUser()
+        _authUser.value = savedUser
+        val accKey = currentAccountKey(savedUser)
+        mariaDbEngine.activeBusinessId = accKey
+
+        val loadedSettings = readSettings(accKey)
+        val persistedLogo = if (loadedSettings.logoUri.isNotBlank()) {
+            com.example.util.ImageCompressionUtil.persistStoreLogo(appContext, loadedSettings.logoUri, accKey)
+        } else {
+            ""
+        }
+        _settings.value = loadedSettings.copy(logoUri = persistedLogo)
+
+        val hasSeeded = prefs.getBoolean(scopedKey(KEY_INITIAL_SEEDED, accKey), false)
+        val loadedCatalogs = readCatalogs(accKey)
+        val loadedProducts = readProducts(accKey)
+
+        if (!hasSeeded && loadedCatalogs.isEmpty()) {
+            val (sampleCatalogs, sampleProducts) = buildSampleCatalogsAndProducts(accKey)
+            _catalogs.value = sampleCatalogs
+            _products.value = sampleProducts
+            writeCatalogs(sampleCatalogs, accKey)
+            writeProducts(sampleProducts, accKey)
+            prefs.edit().putBoolean(scopedKey(KEY_INITIAL_SEEDED, accKey), true).apply()
+        } else {
+            _catalogs.value = loadedCatalogs
+            _products.value = loadedProducts
+        }
+
+        _resellers.value = readResellers(accKey)
+        _orders.value = readOrders(accKey)
+        _shareEvents.value = readShareEvents(accKey)
+        _catalogAnalyticsEvents.value = readCatalogAnalyticsEvents(accKey)
+
+        recalculateAnalytics()
+    }
+
+    /**
+     * Telefon numarası veya Google hesabı ile giriş yapıldığında:
+     * 1) Her telefon numarası için izole bir mağaza anahtarı (`store_<10HaneliTelefon>`) oluşturur.
+     * 2) Bu numaraya kayıtlı bir mağaza (yerelde veya MariaDB `businesses` tablosunda) varsa,
+     *    mağaza adını, logosunu, kataloglarını, ürünlerini ve siparişlerini eksiksiz geri yükler (`needsOnboarding = false`).
+     * 3) Eğer bu telefon numarası ilk kez giriş yapıyorsa, temiz bir mağaza profili ve yalnızca 1 adet
+     *    "Test Deneme Kataloğu" oluşturur ve kullanıcıyı Mağaza Kurulumu (Onboarding) ekranına yönlendirir (`needsOnboarding = true`).
+     */
+    override suspend fun activateUserAccountSession(
+        countryCode: String,
+        phoneNumber: String,
+        passwordHash: String,
+        recoveryEmail: String,
+        firebaseUid: String,
+        provider: String,
+        displayNameHint: String
+    ): Pair<AuthUser, Boolean> {
+        val cleanCountry = countryCode.trim().ifBlank { "+90" }
+        val digitsOnly = phoneNumber.filter { it.isDigit() }
+        val normalizedPhone = normalizePhoneKey(digitsOnly)
+        val fullPhone = if (digitsOnly.isNotBlank()) "$cleanCountry $digitsOnly" else ""
+
+        val userId = when {
+            normalizedPhone.isNotBlank() -> "usr-phone-$normalizedPhone"
+            firebaseUid.isNotBlank() -> "usr-fb-${firebaseUid.take(16)}"
+            recoveryEmail.isNotBlank() -> "usr-mail-${slugify(recoveryEmail).take(16)}"
+            else -> "usr-${UUID.randomUUID().toString().take(8)}"
+        }
+        val accountKey = when {
+            normalizedPhone.isNotBlank() -> "store_$normalizedPhone"
+            recoveryEmail.isNotBlank() -> "store_${slugify(recoveryEmail).take(24)}"
+            else -> "store_${userId.replace(Regex("[^a-zA-Z0-9_-]"), "").take(24)}"
+        }
+        mariaDbEngine.activeBusinessId = accountKey
+
+        // 1) Bu telefon numarasına ait yerel veya MariaDB mağaza kaydını kontrol et
+        val hasLocalSavedSettings = prefs.contains(scopedKey(KEY_SETTINGS, accountKey))
+        val localAccountSettings = if (hasLocalSavedSettings) {
+            readSettings(accountKey)
+        } else {
+            null
+        }
+        val remoteAccountSettings = runCatching {
+            mariaDbEngine.fetchBusinessSettingsByIdOrPhone(accountKey, normalizedPhone)
+        }.getOrNull()
+
+        val resolvedExistingSettings: StoreSettings? = when {
+            localAccountSettings != null && localAccountSettings.businessName.isNotBlank() -> {
+                val mergedLogo = localAccountSettings.logoUri.ifBlank { remoteAccountSettings?.logoUri.orEmpty() }
+                val persistedLogo = if (mergedLogo.isNotBlank()) {
+                    com.example.util.ImageCompressionUtil.persistStoreLogo(appContext, mergedLogo, accountKey)
+                } else ""
+                localAccountSettings.copy(logoUri = persistedLogo)
+            }
+            remoteAccountSettings != null && remoteAccountSettings.businessName.isNotBlank() -> {
+                remoteAccountSettings
+            }
+            else -> null
+        }
+
+        val hasExistingStore = resolvedExistingSettings != null && resolvedExistingSettings.businessName.isNotBlank()
+
+        if (hasExistingStore && resolvedExistingSettings != null) {
+            // MEVCUT KULLANICI / MAĞAZA: O telefon numarasına kayıtlı mağaza bilgilerini, logoyu ve katalogları yükle
+            _settings.value = resolvedExistingSettings
+            writeSettings(resolvedExistingSettings, accountKey)
+
+            val localCats = readCatalogs(accountKey)
+            val localProds = readProducts(accountKey)
+            val remoteCats = runCatching { mariaDbEngine.fetchAllRelationalCatalogs(accountKey) }.getOrDefault(emptyList())
+            val remoteProds = runCatching { mariaDbEngine.fetchAllRelationalProducts(accountKey) }.getOrDefault(emptyList())
+
+            val mergedCatsMap = LinkedHashMap<String, Catalog>()
+            localCats.forEach { mergedCatsMap[it.id] = it }
+            remoteCats.forEach { rCat ->
+                val ex = mergedCatsMap[rCat.id]
+                if (ex == null) {
+                    mergedCatsMap[rCat.id] = rCat
+                } else {
+                    mergedCatsMap[rCat.id] = ex.copy(
+                        viewCount = max(ex.viewCount, rCat.viewCount),
+                        orderCount = max(ex.orderCount, rCat.orderCount),
+                        coverImageUrl = ex.coverImageUrl.ifBlank { rCat.coverImageUrl }
+                    )
+                }
+            }
+
+            val mergedProdsMap = LinkedHashMap<String, Product>()
+            localProds.forEach { mergedProdsMap[it.id] = it }
+            remoteProds.forEach { rProd ->
+                if (!mergedProdsMap.containsKey(rProd.id)) {
+                    mergedProdsMap[rProd.id] = rProd
+                }
+            }
+
+            val finalCatalogs: List<Catalog>
+            val finalProducts: List<Product>
+            if (mergedCatsMap.isEmpty()) {
+                val (sampleCats, sampleProds) = buildSampleCatalogsAndProducts(accountKey)
+                finalCatalogs = sampleCats
+                finalProducts = sampleProds
+            } else {
+                finalProducts = mergedProdsMap.values.toList()
+                finalCatalogs = mergedCatsMap.values.map { cat ->
+                    val cnt = finalProducts.count { it.catalogId == cat.id }
+                    cat.copy(
+                        productCount = if (cnt > 0) cnt else cat.productCount,
+                        coverImageUrl = cat.coverImageUrl.ifBlank {
+                            finalProducts.firstOrNull { it.catalogId == cat.id }?.imageUrl.orEmpty()
+                        }
+                    )
+                }
+            }
+
+            _catalogs.value = finalCatalogs
+            _products.value = finalProducts
+            writeCatalogs(finalCatalogs, accountKey)
+            writeProducts(finalProducts, accountKey)
+            prefs.edit().putBoolean(scopedKey(KEY_INITIAL_SEEDED, accountKey), true).apply()
+
+            val localOrders = readOrders(accountKey)
+            val remoteOrders = runCatching {
+                mariaDbEngine.fetchRelationalOrders(accountKey, finalCatalogs.map { it.id }.toSet())
+            }.getOrDefault(emptyList())
+            val mergedOrders = enrichOrdersWithProductImages(
+                (remoteOrders + localOrders).distinctBy { it.id }.sortedByDescending { it.createdAt },
+                finalProducts
+            )
+            _orders.value = mergedOrders
+            writeOrders(mergedOrders, accountKey)
+
+            _resellers.value = readResellers(accountKey)
+            _shareEvents.value = readShareEvents(accountKey)
+            _catalogAnalyticsEvents.value = readCatalogAnalyticsEvents(accountKey)
+            recalculateAnalytics()
+        } else {
+            // YENİ TELEFON NUMARASI / YENİ KULLANICI: Sıfır mağaza profili + yalnızca 1 adet "Test Deneme Kataloğu"
+            val emptyStore = StoreSettings.emptyForNewUser(
+                phoneWhatsapp = fullPhone,
+                ownerName = displayNameHint.ifBlank { "Mağaza Sahibi" },
+                ownerContact = fullPhone.ifBlank { recoveryEmail }
+            )
+            _settings.value = emptyStore
+            prefs.edit().remove(scopedKey(KEY_SETTINGS, accountKey)).apply()
+
+            val (sampleCatalogs, sampleProducts) = buildSampleCatalogsAndProducts(accountKey)
+            _catalogs.value = sampleCatalogs
+            _products.value = sampleProducts
+            writeCatalogs(sampleCatalogs, accountKey)
+            writeProducts(sampleProducts, accountKey)
+            prefs.edit().putBoolean(scopedKey(KEY_INITIAL_SEEDED, accountKey), true).apply()
+
+            _orders.value = emptyList()
+            _resellers.value = emptyList()
+            _shareEvents.value = emptyList()
+            _catalogAnalyticsEvents.value = emptyList()
+            recalculateAnalytics()
+        }
+
+        val resolvedDisplayName = when {
+            hasExistingStore && resolvedExistingSettings != null -> resolvedExistingSettings.businessName
+            displayNameHint.isNotBlank() -> displayNameHint
+            else -> "Yeni Mağaza"
+        }
+
+        val user = AuthUser(
+            id = userId,
+            phoneCountryCode = cleanCountry,
+            phoneNumber = digitsOnly,
+            fullPhone = fullPhone,
+            email = recoveryEmail,
+            displayName = resolvedDisplayName,
+            passwordHash = passwordHash,
+            firebaseUid = firebaseUid,
+            provider = provider,
+            isOnboardingCompleted = hasExistingStore,
+            loggedInAt = System.currentTimeMillis()
+        )
+        saveAuthUser(user)
+
+        return user to !hasExistingStore
+    }
+
     override suspend fun saveAuthUser(user: AuthUser?) {
         _authUser.value = user
+        mariaDbEngine.activeBusinessId = currentAccountKey(user)
         writeAuthUser(user)
     }
 
     override suspend fun clearAuthSession() {
+        // Çıkış yapmadan önce mevcut hesabın tüm ayarlarını ve logosunu kendi anahtarına kaydet
+        val prevKey = currentAccountKey(_authUser.value)
+        if (_settings.value.businessName.isNotBlank()) {
+            writeSettings(_settings.value, prevKey)
+        }
         _authUser.value = null
         prefs.edit().remove(KEY_AUTH_USER).apply()
         mariaDbEngine.syncAuthUserAsync(null, null)
@@ -320,15 +716,36 @@ class LocalStorageDataService(context: Context) : DataService {
         writePhoneCredentials(map.values.toList())
     }
 
+    private fun ensureUniqueSlug(desiredSlug: String, catalogId: String): String {
+        val base = slugify(desiredSlug)
+        val takenByOthers = _catalogs.value
+            .filter { it.id != catalogId }
+            .map { it.slug.lowercase() }
+            .toSet()
+        if (base !in takenByOthers) return base
+        val suffix = catalogId.replace(Regex("[^a-zA-Z0-9]"), "").lowercase().takeLast(4).ifBlank {
+            (100..999).random().toString()
+        }
+        return "$base-$suffix"
+    }
+
     override suspend fun saveCatalog(catalog: Catalog) {
         val current = _catalogs.value.toMutableList()
         val index = current.indexOfFirst { it.id == catalog.id }
+        val previousTitle = if (index >= 0) current[index].title else ""
+        val rawSlugSource = if (catalog.slug.isBlank() || (index >= 0 && previousTitle != catalog.title)) {
+            catalog.title
+        } else {
+            catalog.slug
+        }
+        val resolvedSlug = ensureUniqueSlug(rawSlugSource, catalog.id)
         val resolvedCover = catalog.coverImageUrl.ifBlank {
             _products.value.firstOrNull { it.catalogId == catalog.id }?.imageUrl
-                ?: "https://picsum.photos/seed/${catalog.slug.ifBlank { catalog.id }}/600/600"
+                ?: "https://picsum.photos/seed/${resolvedSlug.ifBlank { catalog.id }}/600/600"
         }
         val productCount = _products.value.count { it.catalogId == catalog.id }
         val normalized = catalog.copy(
+            slug = resolvedSlug,
             coverImageUrl = resolvedCover,
             productCount = if (index >= 0) productCount else catalog.productCount
         )
@@ -340,6 +757,12 @@ class LocalStorageDataService(context: Context) : DataService {
         }
         _catalogs.value = current
         writeCatalogs(current)
+        mariaDbEngine.upsertSingleCatalogAsync(normalized)
+        dbScope.launch {
+            val catProds = _products.value.filter { it.catalogId == normalized.id }
+            runCatching { mariaDbEngine.publishCatalogWithProductsNow(normalized, catProds, _settings.value) }
+            runCatching { firestoreCatalogRepo.upsertCatalog(normalized, _settings.value) }
+        }
         recalculateAnalytics()
     }
 
@@ -349,12 +772,18 @@ class LocalStorageDataService(context: Context) : DataService {
 
     override suspend fun deleteCatalogs(catalogIds: Set<String>) {
         if (catalogIds.isEmpty()) return
+        val removedProductIds = _products.value.filter { it.catalogId in catalogIds }.map { it.id }
         val updatedCatalogs = _catalogs.value.filterNot { it.id in catalogIds }
         val updatedProducts = _products.value.filterNot { it.catalogId in catalogIds }
         _catalogs.value = updatedCatalogs
         _products.value = updatedProducts
         writeCatalogs(updatedCatalogs)
         writeProducts(updatedProducts)
+        mariaDbEngine.deleteCatalogsByIdsAsync(catalogIds)
+        dbScope.launch {
+            catalogIds.forEach { cid -> runCatching { firestoreCatalogRepo.deleteCatalog(cid) } }
+            removedProductIds.forEach { pid -> runCatching { firestoreCatalogRepo.deleteProduct(pid) } }
+        }
         recalculateAnalytics()
     }
 
@@ -487,6 +916,7 @@ class LocalStorageDataService(context: Context) : DataService {
         _products.value = updatedProducts
         writeCatalogs(updatedCatalogs)
         writeProducts(updatedProducts)
+        syncNewCatalogAndProductsToRemote(mergedCatalog, clonedProducts)
         recalculateAnalytics()
         return mergedCatalog
     }
@@ -517,11 +947,7 @@ class LocalStorageDataService(context: Context) : DataService {
                 price = (250 + idx * 75).toDouble(),
                 currency = currencySymbol,
                 imageUrl = url,
-                galleryUrls = listOf(
-                    url,
-                    "https://picsum.photos/seed/photo-gal-${idx}-a/600/600",
-                    "https://picsum.photos/seed/photo-gal-${idx}-b/600/600"
-                ),
+                galleryUrls = listOf(url),
                 subCategory = if (idx % 2 == 0) "Yeni Gelenler" else "Özel Seçki",
                 stockStatus = StockStatus.IN_STOCK,
                 stockCount = 20,
@@ -536,7 +962,7 @@ class LocalStorageDataService(context: Context) : DataService {
             id = newCatalogId,
             title = cleanTitle,
             description = "${createdProducts.size} ürün fotoğrafından otomatik oluşturuldu.",
-            slug = slugify(cleanTitle),
+            slug = ensureUniqueSlug(cleanTitle, newCatalogId),
             coverImageUrl = createdProducts.first().imageUrl,
             tags = listOfNotNull(tag?.trim()?.takeIf { it.isNotBlank() }, "Yeni Sezon").distinct(),
             isActive = true,
@@ -553,6 +979,7 @@ class LocalStorageDataService(context: Context) : DataService {
         _catalogs.value = updatedCatalogs
         writeProducts(updatedProducts)
         writeCatalogs(updatedCatalogs)
+        syncNewCatalogAndProductsToRemote(newCatalog, createdProducts)
         recalculateAnalytics()
         return newCatalog
     }
@@ -613,6 +1040,7 @@ class LocalStorageDataService(context: Context) : DataService {
         _catalogs.value = updatedCatalogs
         writeProducts(updatedProducts)
         writeCatalogs(updatedCatalogs)
+        syncNewCatalogAndProductsToRemote(newCatalog, createdProducts)
         recalculateAnalytics()
         return newCatalog
     }
@@ -685,8 +1113,24 @@ class LocalStorageDataService(context: Context) : DataService {
         _catalogs.value = updatedCatalogs
         writeProducts(updatedProducts)
         writeCatalogs(updatedCatalogs)
+        syncNewCatalogAndProductsToRemote(newCatalog, createdProducts)
         recalculateAnalytics()
         return newCatalog
+    }
+
+    private fun syncNewCatalogAndProductsToRemote(
+        catalog: Catalog,
+        createdProducts: List<Product>
+    ) {
+        dbScope.launch {
+            runCatching {
+                mariaDbEngine.publishCatalogWithProductsNow(catalog, createdProducts, _settings.value)
+            }
+            runCatching {
+                firestoreCatalogRepo.upsertCatalog(catalog, _settings.value)
+                createdProducts.forEach { prod -> firestoreCatalogRepo.upsertProduct(prod) }
+            }
+        }
     }
 
     override suspend fun seedSampleCatalogs() {
@@ -703,11 +1147,7 @@ class LocalStorageDataService(context: Context) : DataService {
         val current = _products.value.toMutableList()
         val index = current.indexOfFirst { it.id == product.id }
         val normalizedGallery = if (product.galleryUrls.isEmpty() && product.imageUrl.isNotBlank()) {
-            listOf(
-                product.imageUrl,
-                "https://picsum.photos/seed/${product.id}-angle2/600/600",
-                "https://picsum.photos/seed/${product.id}-angle3/600/600"
-            )
+            listOf(product.imageUrl)
         } else {
             product.galleryUrls
         }
@@ -735,6 +1175,24 @@ class LocalStorageDataService(context: Context) : DataService {
         _products.value = current
         writeProducts(current)
         syncCatalogProductCounts()
+        val reEnrichedOrders = enrichOrdersWithProductImages(_orders.value, current)
+        if (reEnrichedOrders != _orders.value) {
+            _orders.value = reEnrichedOrders
+            writeOrders(reEnrichedOrders)
+        }
+        mariaDbEngine.upsertSingleProductAsync(normalized)
+        val parentCat = _catalogs.value.find { it.id == normalized.catalogId }
+        if (parentCat != null) {
+            mariaDbEngine.upsertSingleCatalogAsync(parentCat)
+        }
+        dbScope.launch {
+            runCatching {
+                firestoreCatalogRepo.upsertProduct(normalized)
+                if (parentCat != null) {
+                    firestoreCatalogRepo.upsertCatalog(parentCat, _settings.value)
+                }
+            }
+        }
     }
 
     override suspend fun deleteProducts(productIds: Set<String>) {
@@ -743,6 +1201,10 @@ class LocalStorageDataService(context: Context) : DataService {
         _products.value = updated
         writeProducts(updated)
         syncCatalogProductCounts()
+        mariaDbEngine.deleteProductsByIdsAsync(productIds)
+        dbScope.launch {
+            productIds.forEach { pid -> runCatching { firestoreCatalogRepo.deleteProduct(pid) } }
+        }
     }
 
     override suspend fun updateProductsStockStatus(productIds: Set<String>, status: StockStatus) {
@@ -1066,24 +1528,58 @@ class LocalStorageDataService(context: Context) : DataService {
         recalculateAnalytics()
     }
 
+    /**
+     * Sipariş kalemlerindeki fotoğrafların müşterinin katalogda gördüğü ve sipariş ettiği
+     * gerçek ürün fotoğraflarıyla tam uyuşmasını garanti eder.
+     * Boş veya rastgele picsum seed içeren fotoğrafları katalogdaki gerçek ürün görseliyle günceller.
+     */
+    private fun enrichSingleOrderWithProductImages(order: Order, currentProducts: List<Product> = _products.value): Order {
+        val productsById = currentProducts.associateBy { it.id }
+        val productsByName = currentProducts.associateBy { it.name.trim().lowercase() }
+
+        val enrichedItems = order.items.map { item ->
+            val matchedProduct = productsById[item.productId]
+                ?: productsByName[item.productName.trim().lowercase()]
+
+            val actualImg = when {
+                !matchedProduct?.imageUrl.isNullOrBlank() -> matchedProduct!!.imageUrl
+                !matchedProduct?.galleryUrls.isNullOrEmpty() -> matchedProduct!!.galleryUrls.first()
+                item.imageUrl.isNotBlank() && !item.imageUrl.contains("picsum.photos/seed/") -> item.imageUrl
+                else -> item.imageUrl
+            }
+            if (actualImg != item.imageUrl) {
+                item.copy(imageUrl = actualImg)
+            } else {
+                item
+            }
+        }
+        return order.copy(items = enrichedItems)
+    }
+
+    private fun enrichOrdersWithProductImages(orders: List<Order>, currentProducts: List<Product> = _products.value): List<Order> {
+        if (orders.isEmpty()) return emptyList()
+        return orders.map { enrichSingleOrderWithProductImages(it, currentProducts) }
+    }
+
     override suspend fun createCustomerOrder(order: Order) {
         val now = order.createdAt.takeIf { it > 0 } ?: System.currentTimeMillis()
-        val catalogTitle = order.catalogTitle.ifBlank {
-            _catalogs.value.find { it.id == order.catalogId }?.title ?: "Dijital Katalog"
+        val enrichedOrder = enrichSingleOrderWithProductImages(order)
+        val catalogTitle = enrichedOrder.catalogTitle.ifBlank {
+            _catalogs.value.find { it.id == enrichedOrder.catalogId }?.title ?: "Dijital Katalog"
         }
-        val normalizedOrderNumber = order.orderNumber.ifBlank {
-            if (order.id.startsWith("SIP-", ignoreCase = true)) {
-                "#${order.id.uppercase()}"
+        val normalizedOrderNumber = enrichedOrder.orderNumber.ifBlank {
+            if (enrichedOrder.id.startsWith("SIP-", ignoreCase = true)) {
+                "#${enrichedOrder.id.uppercase()}"
             } else {
-                "#SIP-${order.id.takeLast(4).uppercase()}"
+                "#SIP-${enrichedOrder.id.takeLast(4).uppercase()}"
             }
         }
 
         // YENİ SİPARİŞ GELDİĞİNDE STOĞU OTOMATİK DÜŞÜR (stok takibi açıksa)
-        val deductedNames = deductOrRestoreStockForOrderItems(order.items, deduct = true)
+        val deductedNames = deductOrRestoreStockForOrderItems(enrichedOrder.items, deduct = true)
 
-        val initialTimeline = if (order.timeline.isNotEmpty()) {
-            order.timeline
+        val initialTimeline = if (enrichedOrder.timeline.isNotEmpty()) {
+            enrichedOrder.timeline
         } else {
             val stockNote = if (deductedNames.isNotEmpty()) {
                 "Stoktan otomatik düşüldü: ${deductedNames.joinToString(", ")}"
@@ -1093,15 +1589,15 @@ class LocalStorageDataService(context: Context) : DataService {
             listOf(
                 OrderTimelineEntry(
                     id = "tl-${UUID.randomUUID().toString().take(8)}",
-                    status = order.status,
-                    title = "Sipariş oluşturuldu (${order.status.labelTr})",
+                    status = enrichedOrder.status,
+                    title = "Sipariş oluşturuldu (${enrichedOrder.status.labelTr})",
                     note = stockNote,
                     timestamp = now
                 )
             )
         }
 
-        val normalizedOrder = order.copy(
+        val normalizedOrder = enrichedOrder.copy(
             orderNumber = normalizedOrderNumber,
             catalogTitle = catalogTitle,
             timeline = initialTimeline,
@@ -1110,6 +1606,7 @@ class LocalStorageDataService(context: Context) : DataService {
         )
 
         val updatedOrders = listOf(normalizedOrder) + _orders.value
+
         _orders.value = updatedOrders
         writeOrders(updatedOrders)
 
@@ -1124,7 +1621,7 @@ class LocalStorageDataService(context: Context) : DataService {
         _catalogs.value = updatedCatalogs
         writeCatalogs(updatedCatalogs)
 
-        // Bildirim ekle
+        // Bildirim ekle + Gerçek Android sistem bildirimi ve uygulama içi uyarı tetikle!
         val newNotif = AppNotification(
             id = "notif-${UUID.randomUUID().toString().take(8)}",
             title = "Yeni Sipariş Geldi! (${normalizedOrder.orderNumber})",
@@ -1133,6 +1630,14 @@ class LocalStorageDataService(context: Context) : DataService {
             isUnread = true
         )
         _notifications.value = listOf(newNotif) + _notifications.value
+        _latestOrderAlert.value = normalizedOrder
+        if (_settings.value.notificationsEnabled && _settings.value.notifyNewOrder) {
+            com.example.util.OrderNotificationHelper.showNewOrderNotification(
+                context = appContext,
+                order = normalizedOrder,
+                storeName = _settings.value.businessName
+            )
+        }
         recalculateAnalytics()
     }
 
@@ -1277,8 +1782,35 @@ class LocalStorageDataService(context: Context) : DataService {
     }
 
     override suspend fun updateSettings(newSettings: StoreSettings) {
-        _settings.value = newSettings
-        writeSettings(newSettings)
+        val accKey = currentAccountKey()
+        val persistedLogo = if (newSettings.logoUri.isNotBlank()) {
+            com.example.util.ImageCompressionUtil.persistStoreLogo(appContext, newSettings.logoUri, accKey)
+        } else {
+            ""
+        }
+        val normalizedSettings = newSettings.copy(logoUri = persistedLogo)
+        _settings.value = normalizedSettings
+        writeSettings(normalizedSettings, accKey)
+
+        // Mağaza adı veya logosu güncellendiğinde aktif kullanıcı adını ve yayındaki katalogların mağaza bilgisini de senkronize et
+        val currentUser = _authUser.value
+        if (currentUser != null && normalizedSettings.businessName.isNotBlank() && currentUser.displayName != normalizedSettings.businessName) {
+            val updatedUser = currentUser.copy(
+                displayName = normalizedSettings.businessName,
+                isOnboardingCompleted = true
+            )
+            _authUser.value = updatedUser
+            writeAuthUser(updatedUser)
+        }
+
+        dbScope.launch {
+            _catalogs.value.filter { it.isActive }.forEach { cat ->
+                val catProds = _products.value.filter { it.catalogId == cat.id }
+                runCatching {
+                    mariaDbEngine.publishCatalogWithProductsNow(cat, catProds, normalizedSettings, accKey)
+                }
+            }
+        }
     }
 
     override suspend fun markAllNotificationsRead() {
@@ -1297,6 +1829,12 @@ class LocalStorageDataService(context: Context) : DataService {
         shortId: String,
         referrer: String
     ) {
+        recordLiveHeartbeat(
+            catalogId = catalogId,
+            catalogSlug = shortId,
+            sessionId = sessionId,
+            event = "catalog_open"
+        )
         // Aynı oturumu (sessionId + catalogId) tekrar saymamak için kontrol et
         val alreadyVisitedInSession = _catalogAnalyticsEvents.value.any {
             it.eventType == "visit" && it.sessionId == sessionId && it.catalogId == catalogId
@@ -1331,6 +1869,13 @@ class LocalStorageDataService(context: Context) : DataService {
         productId: String,
         productName: String
     ) {
+        recordLiveHeartbeat(
+            catalogId = catalogId,
+            catalogSlug = shortId,
+            sessionId = sessionId,
+            event = "product_view",
+            productId = productId
+        )
         // Aynı oturumda aynı ürün görüntülemesini tekrar saymamak için sessionId kontrolü
         val alreadyViewedInSession = _catalogAnalyticsEvents.value.any {
             it.eventType == "productView" && it.sessionId == sessionId && it.productId == productId
@@ -1359,6 +1904,14 @@ class LocalStorageDataService(context: Context) : DataService {
         productName: String,
         quantity: Int
     ) {
+        recordLiveHeartbeat(
+            catalogId = catalogId,
+            catalogSlug = shortId,
+            sessionId = sessionId,
+            event = "add_to_cart",
+            productId = productId,
+            quantity = quantity
+        )
         val newEvent = CatalogAnalyticsEvent(
             id = "evt-${UUID.randomUUID().toString().take(8)}",
             sessionId = sessionId,
@@ -1372,6 +1925,62 @@ class LocalStorageDataService(context: Context) : DataService {
         val updatedEvents = listOf(newEvent) + _catalogAnalyticsEvents.value
         _catalogAnalyticsEvents.value = updatedEvents
         writeCatalogAnalyticsEvents(updatedEvents)
+    }
+
+    override suspend fun ensureCatalogPublishedAndSynced(catalogId: String) {
+        val currentList = _catalogs.value.toMutableList()
+        val idx = currentList.indexOfFirst { it.id == catalogId }
+        if (idx < 0) return
+        val cat = currentList[idx]
+        val catProducts = _products.value.filter { it.catalogId == catalogId }
+        val resolvedSlug = ensureUniqueSlug(cat.title.ifBlank { cat.slug }, cat.id)
+        val activeCatalog = cat.copy(
+            isActive = true,
+            slug = resolvedSlug,
+            productCount = catProducts.size,
+            coverImageUrl = cat.coverImageUrl.ifBlank { catProducts.firstOrNull()?.imageUrl.orEmpty() }
+        )
+        currentList[idx] = activeCatalog
+        _catalogs.value = currentList
+        writeCatalogs(currentList)
+
+        // Web vitrininde (constantinopolishotel.store/c/<slug>) anında açılabilmesi için
+        // MariaDB'ye senkron olarak (tamamlanmasını bekleyerek) katalog + mağaza + tüm ürünleri yaz!
+        runCatching {
+            mariaDbEngine.publishCatalogWithProductsNow(
+                catalog = activeCatalog,
+                products = catProducts,
+                settings = _settings.value
+            )
+        }
+
+        dbScope.launch {
+            runCatching {
+                firestoreCatalogRepo.upsertCatalog(activeCatalog, _settings.value)
+                catProducts.forEach { prod -> firestoreCatalogRepo.upsertProduct(prod) }
+            }
+        }
+    }
+
+    override suspend fun fetchRemotePublicCatalog(
+        slugOrShortId: String
+    ): Pair<Catalog, List<Product>>? {
+        val clean = slugOrShortId.trim().removePrefix("/c/").removePrefix("c/").trim('/')
+        if (clean.isEmpty()) return null
+
+        val fetched = runCatching {
+            firestoreCatalogRepo.fetchPublicCatalogAndProducts(clean)
+        }.getOrNull() ?: runCatching {
+            mariaDbEngine.fetchCatalogAndProductsBySlugOrId(clean)
+        }.getOrNull() ?: return null
+
+        val (remoteCatalog, remoteProducts) = fetched
+        val mergedCatalogs = (_catalogs.value.filterNot { it.id == remoteCatalog.id } + remoteCatalog)
+        val remoteProdIds = remoteProducts.map { it.id }.toSet()
+        val mergedProducts = (_products.value.filterNot { it.id in remoteProdIds } + remoteProducts)
+        _catalogs.value = mergedCatalogs
+        _products.value = mergedProducts
+        return remoteCatalog to remoteProducts
     }
 
     override suspend fun seedSampleAnalyticsEvents() {
@@ -1530,8 +2139,8 @@ class LocalStorageDataService(context: Context) : DataService {
         mariaDbEngine.syncPhoneCredentialsAsync(list, json)
     }
 
-    private fun readCatalogs(): List<Catalog> {
-        val raw = prefs.getString(KEY_CATALOGS, null) ?: return emptyList()
+    private fun readCatalogs(accountKey: String = currentAccountKey()): List<Catalog> {
+        val raw = prefs.getString(scopedKey(KEY_CATALOGS, accountKey), null) ?: return emptyList()
         return runCatching {
             val array = JSONArray(raw)
             buildList {
@@ -1564,7 +2173,7 @@ class LocalStorageDataService(context: Context) : DataService {
         }.getOrDefault(emptyList())
     }
 
-    private fun writeCatalogs(list: List<Catalog>) {
+    private fun writeCatalogs(list: List<Catalog>, accountKey: String = currentAccountKey()) {
         val array = JSONArray()
         list.forEach { item ->
             val tagsArr = JSONArray()
@@ -1586,12 +2195,12 @@ class LocalStorageDataService(context: Context) : DataService {
             )
         }
         val json = array.toString()
-        prefs.edit().putString(KEY_CATALOGS, json).apply()
-        mariaDbEngine.syncCatalogsAsync(list, json)
+        prefs.edit().putString(scopedKey(KEY_CATALOGS, accountKey), json).apply()
+        mariaDbEngine.syncCatalogsAsync(list, json, accountKey)
     }
 
-    private fun readProducts(): List<Product> {
-        val raw = prefs.getString(KEY_PRODUCTS, null) ?: return emptyList()
+    private fun readProducts(accountKey: String = currentAccountKey()): List<Product> {
+        val raw = prefs.getString(scopedKey(KEY_PRODUCTS, accountKey), null) ?: return emptyList()
         return runCatching {
             val array = JSONArray(raw)
             buildList {
@@ -1687,7 +2296,7 @@ class LocalStorageDataService(context: Context) : DataService {
         }.getOrDefault(emptyList())
     }
 
-    private fun writeProducts(list: List<Product>) {
+    private fun writeProducts(list: List<Product>, accountKey: String = currentAccountKey()) {
         val array = JSONArray()
         list.forEach { item ->
             val galleryArr = JSONArray()
@@ -1748,12 +2357,12 @@ class LocalStorageDataService(context: Context) : DataService {
             )
         }
         val json = array.toString()
-        prefs.edit().putString(KEY_PRODUCTS, json).apply()
-        mariaDbEngine.syncProductsAsync(list, json)
+        prefs.edit().putString(scopedKey(KEY_PRODUCTS, accountKey), json).apply()
+        mariaDbEngine.syncProductsAsync(list, json, accountKey)
     }
 
-    private fun readOrders(): List<Order> {
-        val raw = prefs.getString(KEY_ORDERS, null) ?: return emptyList()
+    private fun readOrders(accountKey: String = currentAccountKey()): List<Order> {
+        val raw = prefs.getString(scopedKey(KEY_ORDERS, accountKey), null) ?: return emptyList()
         return runCatching {
             val array = JSONArray(raw)
             buildList {
@@ -1825,7 +2434,7 @@ class LocalStorageDataService(context: Context) : DataService {
                             id = idStr,
                             orderNumber = orderNo,
                             catalogId = obj.optString("catalogId"),
-                            catalogTitle = obj.optString("catalogTitle", "2025 İlkbahar / Yaz Koleksiyonu"),
+                            catalogTitle = obj.optString("catalogTitle", "Test Deneme Kataloğu"),
                             customerName = obj.optString("customerName"),
                             customerPhone = obj.optString("customerPhone"),
                             customerAddress = obj.optString("customerAddress", ""),
@@ -1843,15 +2452,17 @@ class LocalStorageDataService(context: Context) : DataService {
                     )
                 }
             }
+        }.map { parsedList ->
+            enrichOrdersWithProductImages(parsedList, _products.value)
         }.getOrDefault(emptyList())
     }
 
-    private fun writeOrders(list: List<Order>) {
+    private fun writeOrders(list: List<Order>, accountKey: String = currentAccountKey()) {
         val array = JSONArray()
         list.forEach { order ->
-            val itemsArr = JSONArray()
+            val itemsArray = JSONArray()
             order.items.forEach { item ->
-                itemsArr.put(
+                itemsArray.put(
                     JSONObject().apply {
                         put("productId", item.productId)
                         put("productName", item.productName)
@@ -1862,9 +2473,9 @@ class LocalStorageDataService(context: Context) : DataService {
                     }
                 )
             }
-            val timelineArr = JSONArray()
+            val timelineArray = JSONArray()
             order.timeline.forEach { entry ->
-                timelineArr.put(
+                timelineArray.put(
                     JSONObject().apply {
                         put("id", entry.id)
                         put("status", entry.status.name)
@@ -1884,11 +2495,11 @@ class LocalStorageDataService(context: Context) : DataService {
                     put("customerPhone", order.customerPhone)
                     put("customerAddress", order.customerAddress)
                     put("customerNote", order.customerNote)
-                    put("items", itemsArr)
+                    put("items", itemsArray)
                     put("totalAmount", order.totalAmount)
                     put("currency", order.currency)
                     put("status", order.status.name)
-                    put("timeline", timelineArr)
+                    put("timeline", timelineArray)
                     put("stockDeducted", order.stockDeducted)
                     put("resellerId", order.resellerId)
                     put("resellerName", order.resellerName)
@@ -1897,12 +2508,12 @@ class LocalStorageDataService(context: Context) : DataService {
             )
         }
         val json = array.toString()
-        prefs.edit().putString(KEY_ORDERS, json).apply()
-        mariaDbEngine.syncOrdersAsync(list, json)
+        prefs.edit().putString(scopedKey(KEY_ORDERS, accountKey), json).apply()
+        mariaDbEngine.syncOrdersAsync(list, json, accountKey)
     }
 
-    private fun readResellers(): List<Reseller> {
-        val raw = prefs.getString(KEY_RESELLERS, null) ?: return emptyList()
+    private fun readResellers(accountKey: String = currentAccountKey()): List<Reseller> {
+        val raw = prefs.getString(scopedKey(KEY_RESELLERS, accountKey), null) ?: return emptyList()
         return runCatching {
             val array = JSONArray(raw)
             buildList {
@@ -1937,7 +2548,7 @@ class LocalStorageDataService(context: Context) : DataService {
         }.getOrDefault(emptyList())
     }
 
-    private fun writeResellers(list: List<Reseller>) {
+    private fun writeResellers(list: List<Reseller>, accountKey: String = currentAccountKey()) {
         val array = JSONArray()
         list.forEach { reseller ->
             val catArr = JSONArray()
@@ -1958,13 +2569,17 @@ class LocalStorageDataService(context: Context) : DataService {
             )
         }
         val json = array.toString()
-        prefs.edit().putString(KEY_RESELLERS, json).apply()
-        mariaDbEngine.syncResellersAsync(list, json)
+        prefs.edit().putString(scopedKey(KEY_RESELLERS, accountKey), json).apply()
+        mariaDbEngine.syncResellersAsync(list, json, accountKey)
     }
 
-    private fun readSettings(): StoreSettings {
-        val defaults = StoreSettings()
-        val raw = prefs.getString(KEY_SETTINGS, null) ?: return defaults
+    private fun readSettings(accountKey: String = currentAccountKey()): StoreSettings {
+        val defaults = if (accountKey == "default_store") {
+            StoreSettings()
+        } else {
+            StoreSettings.emptyForNewUser(phoneWhatsapp = _authUser.value?.fullPhone.orEmpty())
+        }
+        val raw = prefs.getString(scopedKey(KEY_SETTINGS, accountKey), null) ?: return defaults
         return runCatching {
             val obj = JSONObject(raw)
             val planStr = obj.optString("subscriptionPlan", SubscriptionPlan.FREE.name)
@@ -1993,7 +2608,7 @@ class LocalStorageDataService(context: Context) : DataService {
                     }
                 }
             } else {
-                defaultStoreTeamMembers()
+                defaults.teamMembers
             }
 
             StoreSettings(
@@ -2030,7 +2645,7 @@ class LocalStorageDataService(context: Context) : DataService {
         }.getOrDefault(defaults)
     }
 
-    private fun writeSettings(settings: StoreSettings) {
+    private fun writeSettings(settings: StoreSettings, accountKey: String = currentAccountKey()) {
         val teamArr = JSONArray()
         settings.teamMembers.forEach { member ->
             teamArr.put(
@@ -2077,8 +2692,13 @@ class LocalStorageDataService(context: Context) : DataService {
             put("teamMembers", teamArr)
         }
         val json = obj.toString()
-        prefs.edit().putString(KEY_SETTINGS, json).apply()
-        mariaDbEngine.syncSettingsAsync(settings, json)
+        prefs.edit().putString(scopedKey(KEY_SETTINGS, accountKey), json).apply()
+        mariaDbEngine.syncSettingsAsync(
+            settings = settings,
+            rawJson = json,
+            businessId = accountKey,
+            ownerUserId = _authUser.value?.id.orEmpty()
+        )
     }
 
     override suspend fun inviteTeamMember(name: String, emailOrPhone: String, role: TeamRole) {
@@ -2158,15 +2778,23 @@ class LocalStorageDataService(context: Context) : DataService {
     )
 
     /**
-     * 4 Örnek Katalog ve her birinde 8-12 ürün (toplam 38 ürün) üretir.
-     * İndirimli eski fiyatlar, stok rozetleri (Stokta / Az kaldı / Tükendi),
-     * alt kategoriler, varyantlar ve çoklu görsel galerileri dahildir.
+     * Yeni kullanıcılar için YALNIZCA 1 adet örnek "Test Deneme Kataloğu" ve 4 örnek ürün üretir.
+     * Kullanıcılar ister bu örnek kataloğu düzenleyebilir, ister buna bakarak saniyeler içinde
+     * kendi yeni kataloglarını oluşturup paylaşabilir.
      */
-    private fun buildSampleCatalogsAndProducts(): Pair<List<Catalog>, List<Product>> {
+    private fun buildSampleCatalogsAndProducts(
+        accountKey: String = currentAccountKey()
+    ): Pair<List<Catalog>, List<Product>> {
         val now = System.currentTimeMillis()
+        val suffix = if (accountKey == "default_store") {
+            "demo"
+        } else {
+            accountKey.replace(Regex("[^a-zA-Z0-9]"), "").lowercase().takeLast(8).ifBlank { "demo" }
+        }
 
-        // Katalog 1: 10 Ürün
-        val cat1Id = "cat-ilkbahar-yaz"
+        val catId = if (suffix == "demo") "cat-test-deneme" else "cat-test-$suffix"
+        val catSlug = if (suffix == "demo") "test-deneme-katalogu" else "test-deneme-$suffix"
+
         data class SeedSpec(
             val name: String,
             val price: Double,
@@ -2176,224 +2804,54 @@ class LocalStorageDataService(context: Context) : DataService {
             val count: Int
         )
 
-        val cat1Specs = listOf(
-            SeedSpec("Keten Oversize Gömlek", 890.0, 1150.0, "Üst Giyim", StockStatus.IN_STOCK, 34),
-            SeedSpec("Yüksek Bel Palazzo Pantolon", 1150.0, null, "Alt Giyim", StockStatus.IN_STOCK, 18),
-            SeedSpec("Müslin Plaj Elbisesi", 1290.0, 1590.0, "Elbise", StockStatus.LOW_STOCK, 4),
-            SeedSpec("Kruvaze Yaka Blazer Ceket", 1850.0, null, "Dış Giyim", StockStatus.IN_STOCK, 12),
-            SeedSpec("Organik Pamuk Basic Tişört", 450.0, 550.0, "Üst Giyim", StockStatus.IN_STOCK, 50),
-            SeedSpec("Pileli Midi Etek", 980.0, null, "Alt Giyim", StockStatus.LOW_STOCK, 3),
-            SeedSpec("Hasır Dokuma Omuz Çantası", 760.0, 950.0, "Aksesuar", StockStatus.OUT_OF_STOCK, 0),
-            SeedSpec("İnce Triko Hırka", 820.0, null, "Üst Giyim", StockStatus.IN_STOCK, 22),
-            SeedSpec("Poplin Kuşaklı Elbise", 1420.0, 1750.0, "Elbise", StockStatus.IN_STOCK, 15),
-            SeedSpec("Deri Görünümlü Sandalet", 1100.0, null, "Aksesuar", StockStatus.LOW_STOCK, 5)
+        val specs = listOf(
+            SeedSpec("Örnek Ürün 1 - Keten Gömlek", 890.0, 1150.0, "Yeni Sezon", StockStatus.IN_STOCK, 25),
+            SeedSpec("Örnek Ürün 2 - Palazzo Pantolon", 1150.0, null, "Yeni Sezon", StockStatus.IN_STOCK, 18),
+            SeedSpec("Örnek Ürün 3 - Seramik Vazo Seti", 640.0, 820.0, "Özel Seçki", StockStatus.LOW_STOCK, 4),
+            SeedSpec("Örnek Ürün 4 - Kablosuz Şarj Standı", 950.0, 1190.0, "Popüler", StockStatus.IN_STOCK, 30)
         )
-        val cat1Products = cat1Specs.mapIndexed { idx, spec ->
+
+        val sampleProducts = specs.mapIndexed { idx, spec ->
             val mainImg = "https://picsum.photos/seed/katalog-fashion-${idx + 11}/600/600"
             Product(
-                id = "prod-cat1-$idx",
-                catalogId = cat1Id,
+                id = if (suffix == "demo") "prod-cat1-$idx" else "prod-$suffix-$idx",
+                catalogId = catId,
                 name = spec.name,
-                description = "2025 Yeni Sezon %100 doğal dokulu tasarım koleksiyonu. Nefes alan kumaş yapısı ve modern kesimiyle gün boyu konfor sunar.",
+                description = "Bu örnek ürünü düzenleyebilir, silebilir veya kendi ürün fotoğraflarınızı ekleyerek kataloğunuzu hemen paylaşabilirsiniz.",
                 price = spec.price,
                 originalPrice = spec.originalPrice,
                 currency = "₺",
                 imageUrl = mainImg,
                 galleryUrls = listOf(
                     mainImg,
-                    "https://picsum.photos/seed/katalog-fashion-${idx + 11}-detail1/600/600",
-                    "https://picsum.photos/seed/katalog-fashion-${idx + 11}-detail2/600/600",
-                    "https://picsum.photos/seed/katalog-fashion-${idx + 11}-detail3/600/600"
+                    "https://picsum.photos/seed/katalog-fashion-${idx + 11}-detail1/600/600"
                 ),
                 subCategory = spec.subCat,
                 stockStatus = spec.stock,
                 stockCount = spec.count,
                 inStock = spec.stock != StockStatus.OUT_OF_STOCK,
-                sku = "VR-SS25-${101 + idx}",
+                sku = "TEST-${101 + idx}",
                 variants = defaultClothingVariants(),
                 sortOrder = idx,
                 createdAt = now - idx * 3_600_000L
             )
         }
 
-        // Katalog 2: 9 Ürün
-        val cat2Id = "cat-ev-dekorasyon"
-        val cat2Specs = listOf(
-            SeedSpec("El Yapımı Seramik Vazo Seti", 640.0, 820.0, "Dekoratif Obje", StockStatus.IN_STOCK, 19),
-            SeedSpec("Bambu Sunum Tabağı 3'lü", 490.0, null, "Sofra & Mutfak", StockStatus.IN_STOCK, 28),
-            SeedSpec("Soyut Dokulu Kırlent Kılıfı", 320.0, 420.0, "Ev Tekstili", StockStatus.LOW_STOCK, 4),
-            SeedSpec("Soya Mum & Oda Kokusu Seti", 550.0, null, "Aydınlatma & Koku", StockStatus.IN_STOCK, 35),
-            SeedSpec("Makrome Duvar Süsü", 420.0, null, "Dekoratif Obje", StockStatus.IN_STOCK, 11),
-            SeedSpec("Minimalist Masa Lambası", 1350.0, 1690.0, "Aydınlatma & Koku", StockStatus.LOW_STOCK, 2),
-            SeedSpec("Pamuklu Koltuk Şalı", 690.0, null, "Ev Tekstili", StockStatus.IN_STOCK, 24),
-            SeedSpec("Mermer Desenli Tepsi", 780.0, 920.0, "Sofra & Mutfak", StockStatus.OUT_OF_STOCK, 0),
-            SeedSpec("Cam Karaf ve Bardak Takımı", 860.0, null, "Sofra & Mutfak", StockStatus.IN_STOCK, 16)
-        )
-        val cat2Products = cat2Specs.mapIndexed { idx, spec ->
-            val mainImg = "https://picsum.photos/seed/katalog-decor-${idx + 31}/600/600"
-            Product(
-                id = "prod-cat2-$idx",
-                catalogId = cat2Id,
-                name = spec.name,
-                description = "İskandinav stil doğal ev ve yaşam aksesuarları. El işçiliği detaylarla yaşam alanlarınıza sıcaklık katar.",
-                price = spec.price,
-                originalPrice = spec.originalPrice,
-                currency = "₺",
-                imageUrl = mainImg,
-                galleryUrls = listOf(
-                    mainImg,
-                    "https://picsum.photos/seed/katalog-decor-${idx + 31}-b/600/600",
-                    "https://picsum.photos/seed/katalog-decor-${idx + 31}-c/600/600"
-                ),
-                subCategory = spec.subCat,
-                stockStatus = spec.stock,
-                stockCount = spec.count,
-                inStock = spec.stock != StockStatus.OUT_OF_STOCK,
-                sku = "EV-DK-${201 + idx}",
-                variants = defaultHomeVariants(),
-                sortOrder = idx,
-                createdAt = now - idx * 3_600_000L
-            )
-        }
-
-        // Katalog 3: 11 Ürün
-        val cat3Id = "cat-akilli-aksesuar"
-        val cat3Specs = listOf(
-            SeedSpec("Kablosuz Hızlı Şarj Standı", 950.0, 1190.0, "Şarj & Güç", StockStatus.IN_STOCK, 42),
-            SeedSpec("Gürültü Engelleme Özellikli Kulaklık", 2450.0, 2990.0, "Ses & Müzik", StockStatus.IN_STOCK, 14),
-            SeedSpec("Manyetik MagSafe Cüzdan", 480.0, null, "Mobil Aksesuar", StockStatus.LOW_STOCK, 5),
-            SeedSpec("Alüminyum Laptop Yükseltici", 790.0, 950.0, "Masaüstü", StockStatus.IN_STOCK, 29),
-            SeedSpec("Örgülü Type-C 100W Kablo", 290.0, null, "Şarj & Güç", StockStatus.IN_STOCK, 80),
-            SeedSpec("Akıllı Saat Hasır Kordon", 360.0, 450.0, "Mobil Aksesuar", StockStatus.IN_STOCK, 33),
-            SeedSpec("Taşınabilir 20.000 mAh Powerbank", 1590.0, null, "Şarj & Güç", StockStatus.LOW_STOCK, 3),
-            SeedSpec("Bluetooth Mini Hoparlör", 1120.0, 1390.0, "Ses & Müzik", StockStatus.IN_STOCK, 19),
-            SeedSpec("Mekanik Masaüstü Klavye", 2190.0, null, "Masaüstü", StockStatus.OUT_OF_STOCK, 0),
-            SeedSpec("Ergonomik Dikey Mouse", 980.0, 1200.0, "Masaüstü", StockStatus.IN_STOCK, 21),
-            SeedSpec("Webcam Gizlilik Kapağı 3'lü", 140.0, null, "Mobil Aksesuar", StockStatus.IN_STOCK, 65)
-        )
-        val cat3Products = cat3Specs.mapIndexed { idx, spec ->
-            val mainImg = "https://picsum.photos/seed/katalog-tech-${idx + 51}/600/600"
-            Product(
-                id = "prod-cat3-$idx",
-                catalogId = cat3Id,
-                name = spec.name,
-                description = "Yeni nesil çalışma masası ve mobil teknoloji aksesuarları. Yüksek malzeme kalitesi ve hızlı performans.",
-                price = spec.price,
-                originalPrice = spec.originalPrice,
-                currency = "₺",
-                imageUrl = mainImg,
-                galleryUrls = listOf(
-                    mainImg,
-                    "https://picsum.photos/seed/katalog-tech-${idx + 51}-b/600/600",
-                    "https://picsum.photos/seed/katalog-tech-${idx + 51}-c/600/600"
-                ),
-                subCategory = spec.subCat,
-                stockStatus = spec.stock,
-                stockCount = spec.count,
-                inStock = spec.stock != StockStatus.OUT_OF_STOCK,
-                sku = "TK-AK-${301 + idx}",
-                variants = defaultTechVariants(),
-                sortOrder = idx,
-                createdAt = now - idx * 3_600_000L
-            )
-        }
-
-        // Katalog 4: 8 Ürün
-        val cat4Id = "cat-dogal-bakim"
-        val cat4Specs = listOf(
-            SeedSpec("Hyaluronik Asit Nemlendirici Serum", 590.0, 740.0, "Yüz Bakımı", StockStatus.IN_STOCK, 27),
-            SeedSpec("C Vitamini Aydınlatıcı Tonik", 460.0, 580.0, "Yüz Bakımı", StockStatus.IN_STOCK, 31),
-            SeedSpec("Organik Argan Saç Bakım Yağı", 520.0, null, "Saç Bakımı", StockStatus.LOW_STOCK, 4),
-            SeedSpec("Kil Bazlı Arındırıcı Yüz Maskesi", 380.0, 490.0, "Yüz Bakımı", StockStatus.IN_STOCK, 18),
-            SeedSpec("Gül Suyu Özlü Yüz Temizleme Jeli", 340.0, null, "Yüz Bakımı", StockStatus.IN_STOCK, 40),
-            SeedSpec("SPF 50+ Mineral Güneş Kremi", 680.0, 850.0, "Güneş & Koruma", StockStatus.OUT_OF_STOCK, 0),
-            SeedSpec("Shea Yağlı El & Vücut Losyonu", 310.0, null, "Vücut Bakımı", StockStatus.IN_STOCK, 22),
-            SeedSpec("Yeşim Taşı Yüz Masaj Rulosu", 440.0, 560.0, "Aksesuar", StockStatus.LOW_STOCK, 3)
-        )
-        val cat4Products = cat4Specs.mapIndexed { idx, spec ->
-            val mainImg = "https://picsum.photos/seed/katalog-care-${idx + 71}/600/600"
-            Product(
-                id = "prod-cat4-$idx",
-                catalogId = cat4Id,
-                name = spec.name,
-                description = "Dermatolojik olarak test edilmiş %100 vegan ve doğal içerikli cilt bakım serisi.",
-                price = spec.price,
-                originalPrice = spec.originalPrice,
-                currency = "₺",
-                imageUrl = mainImg,
-                galleryUrls = listOf(
-                    mainImg,
-                    "https://picsum.photos/seed/katalog-care-${idx + 71}-b/600/600",
-                    "https://picsum.photos/seed/katalog-care-${idx + 71}-c/600/600"
-                ),
-                subCategory = spec.subCat,
-                stockStatus = spec.stock,
-                stockCount = spec.count,
-                inStock = spec.stock != StockStatus.OUT_OF_STOCK,
-                sku = "KZ-BK-${401 + idx}",
-                variants = defaultCareVariants(),
-                sortOrder = idx,
-                createdAt = now - idx * 3_600_000L
-            )
-        }
-
-        val catalogs = listOf(
-            Catalog(
-                id = cat1Id,
-                title = "2025 İlkbahar / Yaz Koleksiyonu",
-                description = "Doğal keten ve pamuklu yeni sezon kadın giyim seçkisi",
-                slug = "2025-ilkbahar-yaz",
-                coverImageUrl = cat1Products.first().imageUrl,
-                tags = listOf("Yeni Sezon", "Çok Satanlar"),
-                isActive = true,
-                productCount = cat1Products.size,
-                viewCount = 1284,
-                orderCount = 46,
-                createdAt = now - 86_400_000L * 4
-            ),
-            Catalog(
-                id = cat2Id,
-                title = "Minimalist Ev & Yaşam Seçkisi",
-                description = "El yapımı seramik, ahşap sunum ve dekoratif tekstil ürünleri",
-                slug = "minimalist-ev-yasam",
-                coverImageUrl = cat2Products.first().imageUrl,
-                tags = listOf("İndirimli", "Yeni Sezon"),
-                isActive = true,
-                productCount = cat2Products.size,
-                viewCount = 842,
-                orderCount = 29,
-                createdAt = now - 86_400_000L * 3
-            ),
-            Catalog(
-                id = cat3Id,
-                title = "Akıllı Teknoloji & Masaüstü",
-                description = "Toptan ve perakende mobil aksesuar & ofis ekipmanları",
-                slug = "akilli-teknoloji-masaustu",
-                coverImageUrl = cat3Products.first().imageUrl,
-                tags = listOf("Toptan", "Çok Satanlar"),
-                isActive = true,
-                productCount = cat3Products.size,
-                viewCount = 1690,
-                orderCount = 63,
-                createdAt = now - 86_400_000L * 2
-            ),
-            Catalog(
-                id = cat4Id,
-                title = "Organik Cilt & Bakım Serisi",
-                description = "Sezon sonu özel indirimli doğal kozmetik ürünleri",
-                slug = "organik-cilt-bakim",
-                coverImageUrl = cat4Products.first().imageUrl,
-                tags = listOf("İndirimli"),
-                isActive = false,
-                productCount = cat4Products.size,
-                viewCount = 530,
-                orderCount = 18,
-                createdAt = now - 86_400_000L
-            )
+        val sampleCatalog = Catalog(
+            id = catId,
+            title = "Test Deneme Kataloğu",
+            description = "Bu örnek kataloğu ister düzenleyin ister silin; yeni katalog oluşturup tek tıkla WhatsApp'tan paylaşabilirsiniz.",
+            slug = catSlug,
+            coverImageUrl = sampleProducts.first().imageUrl,
+            tags = listOf("Yeni Sezon", "Örnek"),
+            isActive = true,
+            productCount = sampleProducts.size,
+            viewCount = 12,
+            orderCount = 1,
+            createdAt = now - 3_600_000L
         )
 
-        val allProducts = cat1Products + cat2Products + cat3Products + cat4Products
-        return catalogs to allProducts
+        return listOf(sampleCatalog) to sampleProducts
     }
 
     private fun buildSampleOrders(
@@ -3086,7 +3544,15 @@ class LocalStorageDataService(context: Context) : DataService {
 
     private fun slugify(input: String): String {
         return input
-            .lowercase()
+            .replace("İ", "i")
+            .replace("I", "i")
+            .replace("Ş", "s")
+            .replace("Ğ", "g")
+            .replace("Ü", "u")
+            .replace("Ö", "o")
+            .replace("Ç", "c")
+            .lowercase(java.util.Locale.ROOT)
+            .replace("i\u0307", "i")
             .replace("ş", "s")
             .replace("ğ", "g")
             .replace("ü", "u")
@@ -3098,8 +3564,8 @@ class LocalStorageDataService(context: Context) : DataService {
             .ifBlank { "katalog-${(100..999).random()}" }
     }
 
-    private fun readShareEvents(): List<ShareEvent> {
-        val raw = prefs.getString(KEY_SHARE_EVENTS, null) ?: return emptyList()
+    private fun readShareEvents(accountKey: String = currentAccountKey()): List<ShareEvent> {
+        val raw = prefs.getString(scopedKey(KEY_SHARE_EVENTS, accountKey), null) ?: return emptyList()
         return runCatching {
             val array = JSONArray(raw)
             buildList {
@@ -3135,7 +3601,7 @@ class LocalStorageDataService(context: Context) : DataService {
         }.getOrDefault(emptyList())
     }
 
-    private fun writeShareEvents(list: List<ShareEvent>) {
+    private fun writeShareEvents(list: List<ShareEvent>, accountKey: String = currentAccountKey()) {
         val array = JSONArray()
         list.forEach { item ->
             val catIdsArr = JSONArray()
@@ -3160,12 +3626,12 @@ class LocalStorageDataService(context: Context) : DataService {
             )
         }
         val json = array.toString()
-        prefs.edit().putString(KEY_SHARE_EVENTS, json).apply()
+        prefs.edit().putString(scopedKey(KEY_SHARE_EVENTS, accountKey), json).apply()
         mariaDbEngine.syncShareEventsAsync(list, json)
     }
 
-    private fun readCatalogAnalyticsEvents(): List<CatalogAnalyticsEvent> {
-        val raw = prefs.getString(KEY_ANALYTICS_EVENTS, null) ?: return emptyList()
+    private fun readCatalogAnalyticsEvents(accountKey: String = currentAccountKey()): List<CatalogAnalyticsEvent> {
+        val raw = prefs.getString(scopedKey(KEY_ANALYTICS_EVENTS, accountKey), null) ?: return emptyList()
         return runCatching {
             val array = JSONArray(raw)
             buildList {
@@ -3190,7 +3656,7 @@ class LocalStorageDataService(context: Context) : DataService {
         }.getOrDefault(emptyList())
     }
 
-    private fun writeCatalogAnalyticsEvents(list: List<CatalogAnalyticsEvent>) {
+    private fun writeCatalogAnalyticsEvents(list: List<CatalogAnalyticsEvent>, accountKey: String = currentAccountKey()) {
         val array = JSONArray()
         list.forEach { item ->
             array.put(
@@ -3209,7 +3675,7 @@ class LocalStorageDataService(context: Context) : DataService {
             )
         }
         val json = array.toString()
-        prefs.edit().putString(KEY_ANALYTICS_EVENTS, json).apply()
+        prefs.edit().putString(scopedKey(KEY_ANALYTICS_EVENTS, accountKey), json).apply()
         mariaDbEngine.syncAnalyticsEventsAsync(list, json)
     }
 
