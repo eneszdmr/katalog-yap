@@ -537,13 +537,7 @@ fun CreateFromPhotosModal(
     val scope = rememberCoroutineScope()
 
     var title by remember { mutableStateOf("Yeni Sezon Fotoğraf Kataloğu") }
-    val selectedUris = remember {
-        mutableStateListOf(
-            "https://picsum.photos/seed/katalog-ai-1/700/700",
-            "https://picsum.photos/seed/katalog-ai-2/700/700",
-            "https://picsum.photos/seed/katalog-ai-3/700/700"
-        )
-    }
+    val selectedUris = remember { mutableStateListOf<String>() }
 
     var isAnalyzing by remember { mutableStateOf(false) }
     var progressCompleted by remember { mutableIntStateOf(0) }
@@ -624,58 +618,23 @@ fun CreateFromPhotosModal(
                 tag = "modal_photos_catalog_name"
             )
 
-            // Fotoğraf Seçim Butonları
-            Row(
+            // Fotoğraf Seçim Butonu
+            KYButton(
+                text = if (selectedUris.isEmpty()) {
+                    TrStrings.Catalogs.PICK_PHOTOS_BTN
+                } else {
+                    "Galeriden Seç (${selectedUris.size})"
+                },
+                onClick = {
+                    multiplePhotoPicker.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                    )
+                },
+                variant = ButtonVariant.SECONDARY,
+                leadingIcon = Icons.Outlined.AddPhotoAlternate,
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                KYButton(
-                    text = if (selectedUris.isEmpty()) {
-                        TrStrings.Catalogs.PICK_PHOTOS_BTN
-                    } else {
-                        "Galeriden Seç (${selectedUris.size})"
-                    },
-                    onClick = {
-                        multiplePhotoPicker.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                        )
-                    },
-                    variant = ButtonVariant.SECONDARY,
-                    leadingIcon = Icons.Outlined.AddPhotoAlternate,
-                    modifier = Modifier.weight(1f),
-                    tag = "btn_pick_multiple_photos_for_catalog"
-                )
-
-                Surface(
-                    onClick = {
-                        val seed = System.currentTimeMillis() % 1000
-                        selectedUris.add("https://picsum.photos/seed/photo-$seed/700/700")
-                        aiErrorMessage = null
-                    },
-                    shape = ButtonRoundedXl,
-                    color = SurfaceMuted,
-                    border = BorderStroke(1.dp, BorderLight),
-                    modifier = Modifier.testTag("btn_add_sample_photo_for_catalog")
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Add,
-                            contentDescription = null,
-                            tint = PrimaryBlue,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = "Örnek Ekle",
-                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                            color = PrimaryBlue
-                        )
-                    }
-                }
-            }
+                tag = "btn_pick_multiple_photos_for_catalog"
+            )
 
             // Seçilen Fotoğrafların Önizleme Şeridi
             if (selectedUris.isNotEmpty() && generatedDrafts.isEmpty()) {
@@ -870,7 +829,9 @@ private fun EditableAiDraftCard(
     onRemove: () -> Unit
 ) {
     var tagsText by remember(draft.id) { mutableStateOf(draft.tags.joinToString(", ")) }
-    var priceText by remember(draft.id) { mutableStateOf(draft.price.toInt().toString()) }
+    var priceText by remember(draft.id) {
+        mutableStateOf(if (draft.price > 0.0) draft.price.toInt().toString() else "")
+    }
 
     Surface(
         shape = ButtonRoundedXl,
@@ -963,13 +924,11 @@ private fun EditableAiDraftCard(
                     value = priceText,
                     onValueChange = { newVal ->
                         priceText = newVal
-                        val parsed = newVal.replace(",", ".").toDoubleOrNull()
-                        if (parsed != null && parsed > 0) {
-                            onUpdate(draft.copy(price = parsed))
-                        }
+                        val parsed = newVal.replace(",", ".").toDoubleOrNull() ?: 0.0
+                        onUpdate(draft.copy(price = parsed.coerceAtLeast(0.0)))
                     },
-                    label = "Fiyat (₺)",
-                    placeholder = "750",
+                    label = "Fiyat (₺) (Opsiyonel)",
+                    placeholder = "Belirtilmedi",
                     modifier = Modifier.weight(1f),
                     tag = "ai_draft_price_$index"
                 )

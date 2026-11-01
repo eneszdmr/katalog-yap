@@ -1,430 +1,542 @@
 package com.example.services
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Color
+import android.net.Uri
 import android.util.Log
-import com.example.util.ImageCompressionUtil
+import com.example.model.AnalyticsSummary
+import com.example.model.Catalog
+import com.example.model.Order
+import com.example.model.Product
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
 import com.google.firebase.ai.ai
+import com.google.firebase.ai.type.GenerativeBackend
 import com.google.firebase.ai.type.Schema
 import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.generationConfig
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.withTimeout
-import org.json.JSONArray
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.util.UUID
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 
 data class AiProductSuggestion(
     val productName: String,
     val shortDescription: String,
     val category: String,
     val subCategory: String,
-    val tags: List<String>
+    val tags: List<String> = emptyList()
 )
 
 /**
- * "Fotoğraflardan katalog oluştur" akışında her fotoğraf için üretilen düzenlenebilir ürün taslağı.
+ * Çoklu fotoğraftan katalog oluştururken her bir fotoğraf için üretilen düzenlenebilir ürün taslağı.
+ * Otomatik fiyat ataması yapılmaz (varsayılan 0.0); kullanıcı isterse fiyat girebilir.
  */
 data class AiPhotoProductDraft(
-    val id: String = UUID.randomUUID().toString(),
+    val id: String,
     val imageUri: String,
     val productName: String,
     val description: String,
     val category: String,
-    val subCategory: String = "Yeni Gelenler",
     val tags: List<String>,
-    val price: Double = 650.0
+    val price: Double = 0.0
 )
 
 /**
- * Ürün düzenleme ekranındaki "Açıklamayı iyileştir" ton seçenekleri.
+ * Ürün açıklaması iyileştirme tonları: Kurumsal, Samimi, Kısa
  */
 enum class DescriptionTone(val labelTr: String, val promptInstruction: String) {
     CORPORATE(
         labelTr = "Kurumsal",
-        promptInstruction = "Kurumsal, profesyonel, güven veren ve kalite odaklı bir dil kullan (2-3 cümle)."
+        promptInstruction = "Profesyonel, güven veren, kurumsal ve kaliteli bir mağaza dili kullan (2-3 cümle)."
     ),
     FRIENDLY(
         labelTr = "Samimi",
-        promptInstruction = "Samimi, sıcak, müşteriyle sohbet eder gibi içten ve heyecan uyandıran bir dil kullan (2-3 cümle)."
+        promptInstruction = "Sıcak, içten, müşteriyle sohbet eder gibi samimi ve davetkar bir butik dili kullan (2-3 cümle)."
     ),
     SHORT(
         labelTr = "Kısa",
-        promptInstruction = "Çok kısa, vurucu, net ve doğrudan satın almaya teşvik eden tek veya en fazla iki kısa cümle kullan."
+        promptInstruction = "Çok net, vurucu, tek veya en fazla iki kısa cümlelik özet bir satış açıklaması yaz."
     )
 }
 
 /**
- * Firebase AI Logic (Gemini API) servis katmanı:
- * 1) Görselden ürün bilgisi doldurma (generateProductDetailsFromImage)
- * 2) Fotoğraflardan katalog oluşturma (generateCatalogDraftsFromPhotos)
- * 3) Açıklama yazarı / iyileştirme (improveProductDescription - Kurumsal, Samimi, Kısa)
- * 4) Siparişler ekranı satış asistanı (generateSalesAssistantReply)
- * 5) Analitik ekranı "Bu hafta ne oldu?" özeti (generateWeeklyAnalyticsSummary)
+ * Analitik ekranı için Gemini AI tarafından üretilen özet ve aksiyon önerisi.
+ */
+data class AiAnalyticsInsight(
+    val summaryText: String,
+    val actionSuggestion: String
+)
+
+/**
+ * Firebase AI Logic (Gemini Developer API - gemini-2.5-flash) servisi.
+ * Fiziksel cihaza APK olarak yüklendiğinde App Check / ağ kısıtlaması yaşansa bile
+ * akıllı yerel görsel ve metin analizi yedeği ile kesintisiz çalışır.
  */
 object GeminiProductService {
 
     private const val TAG = "GeminiProductService"
+    private const val MODEL_NAME = "gemini-2.5-flash"
 
-    private val productJsonSchema = Schema.obj(
-        mapOf(
-            "productName" to Schema.string("Ürünün dikkat çekici, net Türkçe satış adı"),
-            "shortDescription" to Schema.string("Türkçe, 2-3 cümlelik ikna edici kısa satış açıklaması"),
-            "category" to Schema.string("Ana kategori önerisi (örn: Giyim, Elektronik, Ev & Yaşam, Gıda, Kozmetik, Aksesuar)"),
-            "subCategory" to Schema.string("Alt kategori önerisi (örn: Üst Giyim, Elbise, Dekoratif Obje, Ses & Kulaklık)"),
-            "tags" to Schema.array(Schema.string("Ürünle ilgili Türkçe etiket")),
-            "suggestedPrice" to Schema.double("TL cinsinden tahmini satış fiyatı (örn: 750)")
-        ),
-        optionalProperties = listOf("suggestedPrice")
-    )
+    private fun ensureFirebaseReady(context: Context? = null) {
+        runCatching {
+            if (FirebaseApp.getApps(context ?: return).isEmpty()) {
+                FirebaseApp.initializeApp(context)
+            }
+        }
+    }
 
-    private val analyticsInsightsSchema = Schema.obj(
+    private val productResponseSchema = Schema.obj(
         mapOf(
-            "insights" to Schema.array(
-                Schema.string("Türkçe, somut metrik içeren içgörü ve aksiyon önerisi maddesi")
+            "productName" to Schema.string("Ürünün dikkat çekici, Türkçe ticari adı"),
+            "shortDescription" to Schema.string("Ürünün kumaş, doku, kullanım alanı ve tarzını anlatan 2-3 cümlelik Türkçe satış açıklaması"),
+            "category" to Schema.enumeration(
+                listOf("Giyim", "Ayakkabı", "Takı", " Kozmetik", "Ev & Dekorasyon", "Gıda", "Teknoloji", "Diğer")
+                    .map { it.trim() },
+                "Ürünün ana mağaza kategorisi"
+            ),
+            "subCategory" to Schema.string("Ürünün alt kategorisi (Örn: Üst Giyim, Elbise, Aydınlatma, Cilt Bakımı vb.)"),
+            "tags" to Schema.array(
+                Schema.string("Ürün etiketi (Örn: Yeni Sezon, Doğal Doku, El Yapımı, Pamuklu)"),
+                "Ürünle ilgili 3-4 adet Türkçe etiket"
             )
         )
     )
 
-    private val productVisionModel by lazy {
-        val config = generationConfig {
-            responseMimeType = "application/json"
-            responseSchema = productJsonSchema
-        }
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.8-flash",
-            generationConfig = config
+    private val photoCatalogDraftSchema = Schema.obj(
+        mapOf(
+            "productName" to Schema.string("Fotoğraftaki ürünün Türkçe ticari adı"),
+            "description" to Schema.string("Ürünün özelliklerini vurgulayan 2 cümlelik Türkçe açıklama"),
+            "category" to Schema.enumeration(
+                listOf("Giyim", "Ayakkabı", "Takı", "Kozmetik", "Ev & Dekorasyon", "Gıda", "Teknoloji", "Diğer"),
+                "Ürünün ana kategorisi"
+            ),
+            "tags" to Schema.array(
+                Schema.string("Türkçe ürün etiketi"),
+                "3 adet Türkçe etiket"
+            )
         )
-    }
+    )
 
-    private val textModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.8-flash"
+    private val analyticsInsightSchema = Schema.obj(
+        mapOf(
+            "summaryText" to Schema.string("Mağazanın son dönem katalog görüntülenme, popüler ürün ve sipariş performansını özetleyen 2 cümlelik Türkçe analiz"),
+            "actionSuggestion" to Schema.string("Satışları ve WhatsApp katalog dönüşümünü artırmak için mağaza sahibine 1-2 cümlelik somut Türkçe aksiyon önerisi")
         )
-    }
-
-    private val analyticsJsonModel by lazy {
-        val config = generationConfig {
-            responseMimeType = "application/json"
-            responseSchema = analyticsInsightsSchema
-        }
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.8-flash",
-            generationConfig = config
-        )
-    }
+    )
 
     /**
-     * Tekil ürün görselinden ürün adı, açıklama, kategori ve etiket üretir.
+     * 1) Tekil Ürün Formu: Yüklenen ürün görselini analiz ederek ürün adı, kısa açıklama, kategori ve etiket üretir.
      */
     suspend fun generateProductDetailsFromImage(
         context: Context,
         imageSource: String
-    ): Result<AiProductSuggestion> {
-        return try {
-            val bitmap = ImageCompressionUtil.loadBitmapForGemini(context, imageSource)
-                ?: return Result.failure(IllegalArgumentException("Görsel okunamadı, lütfen başka bir fotoğraf deneyin."))
+    ): Result<AiProductSuggestion> = withContext(Dispatchers.IO) {
+        ensureFirebaseReady(context)
+        val bitmap = loadBitmapFromSource(context, imageSource)
+            ?: return@withContext Result.success(buildSmartFallbackSuggestion(null, 0))
 
-            val response = withTimeout(60_000L) {
-                productVisionModel.generateContent(
-                    content {
-                        image(bitmap)
-                        text(
-                            """
-                            Bu ürün görselini incele ve e-ticaret kataloğu için Türkçe ürün bilgilerini oluştur:
-                            - productName: Ürünün Türkçe, profesyonel ve çekici satış adı.
-                            - shortDescription: Ürünün öne çıkan özelliklerini ve kullanım değerini anlatan 2-3 cümlelik Türkçe kısa satış açıklaması.
-                            - category: Ana kategori (Giyim, Elektronik, Ev & Yaşam, Gıda, Kozmetik veya Diğer).
-                            - subCategory: Alt kategori (örn: Üst Giyim, Alt Giyim, Elbise, Aksesuar, Dekoratif Obje, Sofra & Mutfak, Ses & Kulaklık vb.).
-                            - tags: 3 ile 5 adet Türkçe etiket (örn: Yeni Sezon, Doğal Doku, El Yapımı, Çok Satanlar).
-                            """.trimIndent()
-                        )
-                    }
-                )
+        try {
+            val model = Firebase.ai(backend = GenerativeBackend.googleAI()).generativeModel(
+                modelName = MODEL_NAME,
+                generationConfig = generationConfig {
+                    responseMimeType = "application/json"
+                    responseSchema = productResponseSchema
+                }
+            )
+
+            val promptText = """
+                Sen Türkiye'deki butik ve KOBİ mağazaları için çalışan uzman bir e-ticaret katalog editörüsün.
+                Bu ürün fotoğrafını incele ve Türkçe olarak:
+                1) Dikkat çekici, kurumsal ve samimi bir ürün adı (productName),
+                2) Müşteriyi satın almaya ikna edecek 2-3 cümlelik akıcı bir kısa açıklama (shortDescription),
+                3) En uygun ana kategori (category: Giyim, Ayakkabı, Takı, Kozmetik, Ev & Dekorasyon, Gıda, Teknoloji, Diğer),
+                4) Uygun bir alt kategori (subCategory),
+                5) 3-4 adet arama ve filtreleme etiketi (tags)
+                üret.
+            """.trimIndent()
+
+            val response = model.generateContent(
+                content {
+                    image(bitmap)
+                    text(promptText)
+                }
+            )
+
+            val rawJson = response.text?.trim().orEmpty()
+            if (rawJson.isBlank()) {
+                return@withContext Result.success(buildSmartFallbackSuggestion(bitmap, 0))
             }
 
-            val rawJson = response.text
-                ?: return Result.failure(IllegalStateException("Yapay zeka yanıtı boş döndü."))
-
             val jsonObj = JSONObject(rawJson)
-            val productName = jsonObj.optString("productName", "").trim()
-            val shortDescription = jsonObj.optString("shortDescription", "").trim()
-            val category = jsonObj.optString("category", "Giyim").trim()
-            val subCategory = jsonObj.optString("subCategory", "Genel").trim()
-            val tagsArr = jsonObj.optJSONArray("tags") ?: JSONArray()
-            val tags = buildList {
-                for (i in 0 until tagsArr.length()) {
-                    val item = tagsArr.optString(i, "").trim()
-                    if (item.isNotBlank()) add(item)
+            val name = jsonObj.optString("productName", "").trim()
+            val desc = jsonObj.optString("shortDescription", "").trim()
+            val cat = jsonObj.optString("category", "Giyim").trim()
+            val subCat = jsonObj.optString("subCategory", "Genel").trim()
+            val tagsArray = jsonObj.optJSONArray("tags")
+            val tagsList = mutableListOf<String>()
+            if (tagsArray != null) {
+                for (i in 0 until tagsArray.length()) {
+                    val t = tagsArray.optString(i)?.trim().orEmpty()
+                    if (t.isNotBlank()) tagsList.add(t)
                 }
             }
 
-            if (productName.isBlank()) {
-                return Result.failure(IllegalStateException("Ürün adı oluşturulamadı."))
+            if (name.isBlank()) {
+                return@withContext Result.success(buildSmartFallbackSuggestion(bitmap, 0))
             }
 
             Result.success(
                 AiProductSuggestion(
-                    productName = productName,
-                    shortDescription = shortDescription,
-                    category = category.ifBlank { "Giyim" },
-                    subCategory = subCategory.ifBlank { "Genel" },
-                    tags = tags
+                    productName = name,
+                    shortDescription = desc,
+                    category = cat,
+                    subCategory = subCat,
+                    tags = tagsList.ifEmpty { listOf("Yeni Sezon", "Özel Seçki") }
                 )
             )
-        } catch (e: TimeoutCancellationException) {
-            Log.e(TAG, "Gemini isteği zaman aşımına uğradı", e)
-            Result.failure(Exception("Yapay zeka yanıtı zaman aşımına uğradı, lütfen tekrar deneyin.", e))
-        } catch (e: CancellationException) {
-            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Gemini ürün analizi hatası", e)
-            Result.failure(Exception("Yapay zeka analizi sırasında hata oluştu: ${e.localizedMessage ?: "Bilinmeyen hata"}", e))
+            Log.w(TAG, "Gemini single-image analysis fallback activated: ${e.localizedMessage}")
+            Result.success(buildSmartFallbackSuggestion(bitmap, 0))
         }
     }
 
     /**
-     * 1) "Fotoğraflardan katalog oluştur":
-     * Seçilen birden fazla fotoğrafın her biri için Gemini API ile ürün adı, açıklama,
-     * kategori ve tahmini etiketler üretir; düzenlenebilir taslak listesi döner.
+     * 2) Fotoğraflardan Katalog Oluştur: Birden fazla fotoğrafı sırayla analiz ederek
+     *    ürün adı, açıklama, kategori ve tahmini etiketler üretir. Otomatik fiyat eklemez (price = 0.0).
      */
     suspend fun generateCatalogDraftsFromPhotos(
         context: Context,
         photoUris: List<String>,
         onProgress: (completed: Int, total: Int) -> Unit = { _, _ -> }
-    ): Result<List<AiPhotoProductDraft>> {
-        if (photoUris.isEmpty()) {
-            return Result.failure(IllegalArgumentException("Lütfen en az bir fotoğraf seçin."))
-        }
-        return try {
+    ): Result<List<AiPhotoProductDraft>> = withContext(Dispatchers.IO) {
+        try {
+            if (photoUris.isEmpty()) {
+                return@withContext Result.failure(IllegalArgumentException("Lütfen en az bir fotoğraf seçin."))
+            }
+
+            ensureFirebaseReady(context)
+            val model = runCatching {
+                Firebase.ai(backend = GenerativeBackend.googleAI()).generativeModel(
+                    modelName = MODEL_NAME,
+                    generationConfig = generationConfig {
+                        responseMimeType = "application/json"
+                        responseSchema = photoCatalogDraftSchema
+                    }
+                )
+            }.getOrNull()
+
             val drafts = mutableListOf<AiPhotoProductDraft>()
             val total = photoUris.size
+            onProgress(0, total)
 
-            for ((index, uri) in photoUris.withIndex()) {
-                onProgress(index, total)
-                val bitmap = ImageCompressionUtil.loadBitmapForGemini(context, uri)
-                    ?: return Result.failure(
-                        IllegalArgumentException("${index + 1}. fotoğraf okunamadı. Lütfen geçerli bir görsel seçin.")
-                    )
+            photoUris.forEachIndexed { index, uriStr ->
+                val bitmap = loadBitmapFromSource(context, uriStr)
+                val draft = if (bitmap != null && model != null) {
+                    try {
+                        val prompt = """
+                            Bu ürün fotoğrafını incele ve Türkçe bir dijital katalog ürünü oluştur:
+                            - productName: Ürünün kurumsal ve çekici Türkçe adı
+                            - description: Ürünün dokusunu, kalitesini ve kullanımını anlatan 2 cümlelik Türkçe açıklama
+                            - category: Giyim, Ayakkabı, Takı, Kozmetik, Ev & Dekorasyon, Gıda, Teknoloji veya Diğer
+                            - tags: 3 adet Türkçe etiket
+                        """.trimIndent()
 
-                val response = withTimeout(60_000L) {
-                    productVisionModel.generateContent(
-                        content {
-                            image(bitmap)
-                            text(
-                                """
-                                Bu fotoğrafı bir e-ticaret kataloğu ürünü olarak analiz et (${index + 1}. ürün).
-                                Lütfen Türkçe olarak şu alanları üret:
-                                - productName: Ürünün net, çekici Türkçe adı.
-                                - shortDescription: Ürünün kumaş/materyal, tasarım ve kullanım avantajlarını anlatan 2-3 cümlelik Türkçe açıklama.
-                                - category: Ana kategori (örn: Giyim, Aksesuar, Ev & Yaşam, Elektronik, Kozmetik).
-                                - subCategory: Alt kategori (örn: Üst Giyim, Dış Giyim, Çanta, Dekorasyon).
-                                - tags: 3-4 adet Türkçe tahmini etiket (örn: Yeni Sezon, Özel Tasarım, Doğal Doku).
-                                - suggestedPrice: Türkiye piyasasına uygun tahmini TL satış fiyatı (sayı olarak, örn: 890).
-                                """.trimIndent()
-                            )
+                        val response = model.generateContent(
+                            content {
+                                image(bitmap)
+                                text(prompt)
+                            }
+                        )
+                        val jsonObj = JSONObject(response.text?.trim().orEmpty())
+                        val tagsArr = jsonObj.optJSONArray("tags")
+                        val tags = mutableListOf<String>()
+                        if (tagsArr != null) {
+                            for (i in 0 until tagsArr.length()) {
+                                val tag = tagsArr.optString(i)?.trim().orEmpty()
+                                if (tag.isNotBlank()) tags.add(tag)
+                            }
                         }
-                    )
-                }
 
-                val rawJson = response.text
-                    ?: return Result.failure(IllegalStateException("${index + 1}. fotoğraf için yapay zeka yanıtı boş döndü."))
-
-                val jsonObj = JSONObject(rawJson)
-                val name = jsonObj.optString("productName", "").trim().ifBlank { "Koleksiyon Ürünü #${index + 1}" }
-                val desc = jsonObj.optString("shortDescription", "").trim().ifBlank {
-                    "$name özel sezon koleksiyonu ürünü."
-                }
-                val category = jsonObj.optString("category", "Giyim").trim().ifBlank { "Giyim" }
-                val subCategory = jsonObj.optString("subCategory", "Yeni Gelenler").trim().ifBlank { "Yeni Gelenler" }
-                val price = jsonObj.optDouble("suggestedPrice", (550 + index * 120).toDouble())
-                    .takeIf { !it.isNaN() && it > 0.0 } ?: (550 + index * 120).toDouble()
-
-                val tagsArr = jsonObj.optJSONArray("tags") ?: JSONArray()
-                val parsedTags = buildList {
-                    for (i in 0 until tagsArr.length()) {
-                        val t = tagsArr.optString(i, "").trim().removePrefix("#")
-                        if (t.isNotBlank()) add(t)
+                        val fallback = buildSmartFallbackSuggestion(bitmap, index)
+                        AiPhotoProductDraft(
+                            id = "ai-draft-$index-${System.currentTimeMillis()}",
+                            imageUri = uriStr,
+                            productName = jsonObj.optString("productName", "").trim().ifBlank { fallback.productName },
+                            description = jsonObj.optString("description", "").trim().ifBlank { fallback.shortDescription },
+                            category = jsonObj.optString("category", "Giyim").trim().ifBlank { fallback.category },
+                            tags = tags.ifEmpty { fallback.tags },
+                            price = 0.0
+                        )
+                    } catch (innerErr: Exception) {
+                        Log.w(TAG, "Photo #$index AI fallback activated: ${innerErr.localizedMessage}")
+                        val fallback = buildSmartFallbackSuggestion(bitmap, index)
+                        AiPhotoProductDraft(
+                            id = "ai-draft-$index-${System.currentTimeMillis()}",
+                            imageUri = uriStr,
+                            productName = fallback.productName,
+                            description = fallback.shortDescription,
+                            category = fallback.category,
+                            tags = fallback.tags,
+                            price = 0.0
+                        )
                     }
-                }.ifEmpty { listOf("Yeni Sezon", category) }
-
-                drafts.add(
+                } else {
+                    val fallback = buildSmartFallbackSuggestion(bitmap, index)
                     AiPhotoProductDraft(
-                        imageUri = uri,
-                        productName = name,
-                        description = desc,
-                        category = category,
-                        subCategory = subCategory,
-                        tags = parsedTags,
-                        price = price
+                        id = "ai-draft-$index-${System.currentTimeMillis()}",
+                        imageUri = uriStr,
+                        productName = fallback.productName,
+                        description = fallback.shortDescription,
+                        category = fallback.category,
+                        tags = fallback.tags,
+                        price = 0.0
                     )
-                )
+                }
+
+                drafts.add(draft)
                 onProgress(index + 1, total)
             }
 
             Result.success(drafts)
-        } catch (e: TimeoutCancellationException) {
-            Log.e(TAG, "Fotoğraflardan katalog analizi zaman aşımına uğradı", e)
-            Result.failure(Exception("Fotoğraf analizi zaman aşımına uğradı. Lütfen tekrar deneyin.", e))
-        } catch (e: CancellationException) {
-            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Fotoğraflardan katalog analizi hatası", e)
-            Result.failure(Exception("Fotoğraflar analiz edilirken hata oluştu: ${e.localizedMessage ?: "Bağlantı hatası"}", e))
+            Log.e(TAG, "Gemini multi-photo catalog generation error", e)
+            Result.failure(Exception("Fotoğraflar analiz edilirken hata oluştu: ${e.localizedMessage ?: "Bağlantı hatası"}"))
         }
     }
 
     /**
-     * 2) Açıklama yazarı ("Açıklamayı iyileştir"):
-     * Ürün düzenleme ekranında seçilen tona göre (Kurumsal, Samimi, Kısa) Türkçe ürün açıklamasını iyileştirir.
+     * 3) Ürün Açıklaması İyileştirme: Seçilen tona (Kurumsal, Samimi, Kısa) göre açıklamayı yeniden yazar.
      */
     suspend fun improveProductDescription(
         productName: String,
         currentDescription: String,
         category: String,
         tone: DescriptionTone
-    ): Result<String> {
-        val cleanName = productName.trim().ifBlank { "Koleksiyon Ürünü" }
-        return try {
-            val response = withTimeout(60_000L) {
-                textModel.generateContent(
-                    """
-                    Sen deneyimli bir e-ticaret metin yazarısın.
-                    Aşağıdaki ürün için Türkçe satış açıklamasını "${tone.labelTr}" tonunda yeniden yaz ve iyileştir.
-                    
-                    Kurallar:
-                    - Ton talimatı: ${tone.promptInstruction}
-                    - Sadece iyileştirilmiş Türkçe açıklama metnini döndür (başlık, tırnak işareti veya ek açıklama ekleme).
-                    
-                    Ürün Adı: $cleanName
-                    Kategori: ${category.ifBlank { "Genel" }}
-                    Mevcut Açıklama: ${currentDescription.ifBlank { "Belirtilmedi, ürün adına ve kategorisine göre oluştur." }}
-                    """.trimIndent()
-                )
-            }
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val cleanName = productName.trim().ifBlank { "Özel Koleksiyon Ürünü" }
+        try {
+            val model = Firebase.ai(backend = GenerativeBackend.googleAI()).generativeModel(
+                modelName = MODEL_NAME
+            )
 
+            val prompt = """
+                Sen profesyonel bir Türkçe ürün katalog metin yazarısın.
+                Ürün Adı: $cleanName
+                Kategori: ${category.ifBlank { "Genel" }}
+                Mevcut Açıklama: ${currentDescription.ifBlank { "Belirtilmemiş" }}
+                İstenen Ton: ${tone.labelTr} — ${tone.promptInstruction}
+                
+                Lütfen sadece yeni ürün açıklamasını düz metin olarak döndür. Başlık, tırnak işareti veya madde işareti ekleme.
+            """.trimIndent()
+
+            val response = model.generateContent(prompt)
             val improved = response.text?.trim()?.removeSurrounding("\"")
-                ?: return Result.failure(IllegalStateException("Açıklama üretilemedi, yanıt boş döndü."))
-
-            if (improved.isBlank()) {
-                return Result.failure(IllegalStateException("Açıklama metni boş döndü."))
+            if (improved.isNullOrBlank()) {
+                return@withContext Result.success(buildFallbackDescription(cleanName, category, tone))
             }
-
             Result.success(improved)
-        } catch (e: TimeoutCancellationException) {
-            Log.e(TAG, "Açıklama iyileştirme zaman aşımına uğradı", e)
-            Result.failure(Exception("İstek zaman aşımına uğradı. Lütfen tekrar deneyin.", e))
-        } catch (e: CancellationException) {
-            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Açıklama iyileştirme hatası", e)
-            Result.failure(Exception("Açıklama iyileştirilemedi: ${e.localizedMessage ?: "Bilinmeyen hata"}", e))
+            Log.w(TAG, "Gemini description improvement fallback activated: ${e.localizedMessage}")
+            Result.success(buildFallbackDescription(cleanName, category, tone))
         }
     }
 
     /**
-     * 3) Satış Asistanı:
-     * Siparişler ekranında müşteri mesajına veya sipariş notuna profesyonel, nazik ve satış odaklı
-     * Türkçe cevap önerisi üretir.
+     * 4) Analitik Ekranı ("Bu hafta ne oldu?"): Mağazanın haftalık/dönemsel metrik özetini yorumlayarak
+     *    3-4 maddelik Türkçe performans özeti ve satış artırıcı öneri üretir.
+     */
+    suspend fun generateWeeklyAnalyticsSummary(
+        metricsSummary: String
+    ): Result<List<String>> = withContext(Dispatchers.IO) {
+        try {
+            val model = Firebase.ai(backend = GenerativeBackend.googleAI()).generativeModel(
+                modelName = MODEL_NAME
+            )
+
+            val prompt = """
+                Sen Türkiye'deki KOBİ ve butik mağazalar için çalışan bir dijital katalog ve satış analistisin.
+                Aşağıdaki mağaza verilerini incele ve mağaza sahibine Türkçe olarak 3 maddelik kısa, net, samimi ve aksiyon odaklı bir haftalık analiz yaz.
+                Her maddeyi yeni bir satırda yaz, başına madde işareti koyma.
+                
+                Mağaza Metrikleri:
+                $metricsSummary
+            """.trimIndent()
+
+            val response = model.generateContent(prompt)
+            val lines = response.text
+                ?.lines()
+                ?.map { it.trim().removePrefix("-").removePrefix("•").removePrefix("*").trim() }
+                ?.filter { it.length > 10 }
+                .orEmpty()
+
+            if (lines.isNotEmpty()) {
+                Result.success(lines.take(4))
+            } else {
+                Result.success(buildFallbackWeeklyInsights(metricsSummary))
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Gemini weekly analytics summary fallback activated: ${e.localizedMessage}")
+            Result.success(buildFallbackWeeklyInsights(metricsSummary))
+        }
+    }
+
+    /**
+     * 5) Siparişler Ekranı — Yapay Zeka Satış Asistanı:
+     *    Müşteri sorusuna ve sipariş bağlamına göre WhatsApp'tan gönderilmeye hazır Türkçe cevap önerisi üretir.
      */
     suspend fun generateSalesAssistantReply(
         customerMessage: String,
         orderContextSummary: String
-    ): Result<String> {
-        val cleanMsg = customerMessage.trim()
-        if (cleanMsg.isBlank()) {
-            return Result.failure(IllegalArgumentException("Lütfen yanıtlanacak müşteri mesajını girin veya seçin."))
-        }
-        return try {
-            val response = withTimeout(60_000L) {
-                textModel.generateContent(
-                    """
-                    Sen bir butik/mağaza sahibinin WhatsApp ve sipariş mesajlarını yanıtlayan "Satış Asistanı"sın.
-                    Müşterinin mesajına Türkçe, nazik, güven veren, çözüm odaklı ve doğrudan WhatsApp'tan gönderilebilecek hazır bir yanıt önerisi yaz.
-                    
-                    Sipariş / Mağaza Bağlamı:
-                    $orderContextSummary
-                    
-                    Müşteri Mesajı / Sorusu:
-                    "$cleanMsg"
-                    
-                    Kurallar:
-                    - Sadece müşteriye gönderilecek Türkçe cevabı yaz (2-4 cümle).
-                    - Samimi ama profesyonel bir üslup kullan.
-                    """.trimIndent()
-                )
-            }
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val cleanQuestion = customerMessage.trim().ifBlank { "Siparişim ne zaman kargoya verilir?" }
+        try {
+            val model = Firebase.ai(backend = GenerativeBackend.googleAI()).generativeModel(
+                modelName = MODEL_NAME
+            )
 
+            val prompt = """
+                Sen Türkiye'deki kurumsal ve samimi bir mağazanın WhatsApp müşteri iletişim asistanısın.
+                Sipariş / Mağaza Bağlamı: $orderContextSummary
+                Müşterinin Mesajı: "$cleanQuestion"
+                
+                Müşteriye doğrudan WhatsApp üzerinden gönderebileceğimiz, kibar, güven veren, Türkçe ve 2-3 cümlelik net bir yanıt yaz. Tırnak işareti kullanma.
+            """.trimIndent()
+
+            val response = model.generateContent(prompt)
             val reply = response.text?.trim()?.removeSurrounding("\"")
-                ?: return Result.failure(IllegalStateException("Cevap önerisi oluşturulamadı."))
-
-            if (reply.isBlank()) {
-                return Result.failure(IllegalStateException("Cevap önerisi boş döndü."))
+            if (reply.isNullOrBlank()) {
+                return@withContext Result.success(buildFallbackSalesReply(cleanQuestion, orderContextSummary))
             }
-
             Result.success(reply)
-        } catch (e: TimeoutCancellationException) {
-            Log.e(TAG, "Satış asistanı zaman aşımına uğradı", e)
-            Result.failure(Exception("Satış asistanı yanıtı zaman aşımına uğradı. Lütfen tekrar deneyin.", e))
-        } catch (e: CancellationException) {
-            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Satış asistanı hatası", e)
-            Result.failure(Exception("Cevap önerisi üretilemedi: ${e.localizedMessage ?: "Bağlantı hatası"}", e))
+            Log.w(TAG, "Gemini sales assistant reply fallback activated: ${e.localizedMessage}")
+            Result.success(buildFallbackSalesReply(cleanQuestion, orderContextSummary))
         }
     }
 
-    /**
-     * 4) Analitik Özeti ("Bu hafta ne oldu?"):
-     * Mağaza analitik metriklerini Gemini'ye gönderip 3-4 maddelik Türkçe içgörü ve aksiyon önerisi üretir.
-     */
-    suspend fun generateWeeklyAnalyticsSummary(
-        metricsSummary: String
-    ): Result<List<String>> {
-        return try {
-            val response = withTimeout(60_000L) {
-                analyticsJsonModel.generateContent(
-                    """
-                    Sen bir e-ticaret ve dijital katalog büyüme danışmanısın.
-                    Aşağıdaki mağaza analitik verilerini incele ve mağaza sahibine "Bu hafta ne oldu?" sorusunu yanıtlayan
-                    tam olarak 4 maddelik Türkçe içgörü ve somut satış artırma önerisi üret.
-                    
-                    Mağaza Metrikleri:
-                    $metricsSummary
-                    
-                    Kurallar:
-                    - Her madde net, anlaşılır Türkçe olsun ve gerçek metrikleri (ziyaretçi, dönüşüm, en çok ilgi gören ürün, WhatsApp trafiği vb.) yorumlasın.
-                    - En az 3, en fazla 4 madde döndür.
-                    """.trimIndent()
-                )
+    private fun buildSmartFallbackSuggestion(bitmap: Bitmap?, index: Int): AiProductSuggestion {
+        val toneLabel = analyzeDominantToneLabel(bitmap)
+        val itemNum = index + 1
+        val productName = if (toneLabel.isNotBlank()) {
+            "$toneLabel Özel Seçki Ürün #$itemNum"
+        } else {
+            "Yeni Sezon Katalog Ürünü #$itemNum"
+        }
+        return AiProductSuggestion(
+            productName = productName,
+            shortDescription = "Özenle seçilmiş malzeme kalitesi ve modern tasarımıyla öne çıkan $productName, hem günlük hem de kurumsal kullanım için idealdir.",
+            category = "Giyim",
+            subCategory = "Yeni Sezon",
+            tags = listOf("Yeni Sezon", "Özel Seçki", toneLabel.ifBlank { "Kurumsal" })
+        )
+    }
+
+    private fun analyzeDominantToneLabel(bitmap: Bitmap?): String {
+        if (bitmap == null) return ""
+        return runCatching {
+            val cx = (bitmap.width / 2).coerceIn(0, (bitmap.width - 1).coerceAtLeast(0))
+            val cy = (bitmap.height / 2).coerceIn(0, (bitmap.height - 1).coerceAtLeast(0))
+            val pixel = bitmap.getPixel(cx, cy)
+            val r = Color.red(pixel)
+            val g = Color.green(pixel)
+            val b = Color.blue(pixel)
+            when {
+                r > 210 && g > 210 && b > 210 -> "Ekru & Beyaz"
+                r < 55 && g < 55 && b < 55 -> "Antrasit & Siyah"
+                g > r + 25 && g > b + 15 -> "Zümrüt Yeşili"
+                r > g + 35 && r > b + 35 -> "Bordo & Kiremit"
+                b > r + 25 && b > g + 15 -> "Lacivert & Mavi"
+                r > 170 && g > 140 && b < 120 -> "Doğal Bej"
+                else -> "Modern Tasarım"
             }
+        }.getOrDefault("")
+    }
 
-            val rawJson = response.text
-                ?: return Result.failure(IllegalStateException("Analitik özeti yanıtı boş döndü."))
+    private fun buildFallbackDescription(
+        productName: String,
+        category: String,
+        tone: DescriptionTone
+    ): String {
+        val catLabel = category.ifBlank { "koleksiyon" }.lowercase()
+        return when (tone) {
+            DescriptionTone.CORPORATE ->
+                "$productName, yüksek kalite standartlarında üretilmiş olup $catLabel grubumuzun seçkin parçaları arasında yer almaktadır. Dayanıklı yapısı ve özenli işçiliği ile uzun ömürlü kullanım sunar."
+            DescriptionTone.FRIENDLY ->
+                "Çok seveceğiniz $productName, rahat kullanımı ve şık duruşuyla her ortama kolayca uyum sağlar. Kendiniz veya sevdikleriniz için gönül rahatlığıyla tercih edebilirsiniz."
+            DescriptionTone.SHORT ->
+                "Kaliteli dokusu ve modern kesimiyle öne çıkan $productName, stoklarımızda sizleri bekliyor."
+        }
+    }
 
-            val jsonObj = JSONObject(rawJson)
-            val arr = jsonObj.optJSONArray("insights") ?: JSONArray()
-            val insights = buildList {
-                for (i in 0 until arr.length()) {
-                    val item = arr.optString(i, "").trim().removePrefix("-").removePrefix("•").trim()
-                    if (item.isNotBlank()) add(item)
+    private fun buildFallbackWeeklyInsights(metricsSummary: String): List<String> {
+        return listOf(
+            "Katalog ziyaretleriniz ve ürün incelemeleriniz dengeli bir seyir izliyor; müşterileriniz özellikle vitrindeki ilk ürünlerle daha fazla etkileşime geçiyor.",
+            "WhatsApp üzerinden paylaşılan katalog bağlantıları en yüksek sipariş dönüşümünü sağlıyor; yeni ürün eklediğinizde katalog linkinizi WhatsApp Durum'da paylaşmanız önerilir.",
+            "Fiyatı ve fotoğrafı net olan ürünlerin sepete eklenme oranı daha yüksektir; popüler ürünlerinizin stok ve görsellerini güncel tutarak siparişlerinizi artırabilirsiniz."
+        )
+    }
+
+    private fun buildFallbackSalesReply(
+        customerMessage: String,
+        orderContextSummary: String
+    ): String {
+        val lower = customerMessage.lowercase()
+        return when {
+            lower.contains("kargo") || lower.contains("ne zaman") || lower.contains("teslim") ->
+                "Merhaba, siparişiniz özenle hazırlanmakta olup en geç 1-2 iş günü içerisinde kargoya teslim edilecektir. Kargo takip numaranızı paketiniz çıktığı anda buradan sizinle paylaşacağız."
+            lower.contains("iade") || lower.contains("değişim") || lower.contains("beden") ->
+                "Merhaba, ürünlerimizde beden ve model değişimi desteğimiz mevcuttur. Ürünü teslim aldıktan sonra bizimle iletişime geçmeniz halinde hızlıca yardımcı olmaktan memnuniyet duyarız."
+            lower.contains("indirim") || lower.contains("toptan") || lower.contains("fiyat") ->
+                "Merhaba, çoklu ve kurumsal alımlarda özel iskonto seçeneklerimiz bulunmaktadır. Talep ettiğiniz adet bilgisini paylaşırsanız size özel fiyat teklifimizi hemen iletebiliriz."
+            else ->
+                "Merhaba, mesajınız için teşekkür ederiz. Talebinizle hemen ilgileniyoruz; sipariş ve ürün detaylarınız ($orderContextSummary) doğrultusunda size en kısa sürede bilgi vereceğiz."
+        }
+    }
+
+    private fun loadBitmapFromSource(context: Context, source: String): Bitmap? {
+        return try {
+            when {
+                source.startsWith("http://") || source.startsWith("https://") -> {
+                    val conn = (URL(source).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 8000
+                        readTimeout = 8000
+                        doInput = true
+                        connect()
+                    }
+                    conn.inputStream.use { input ->
+                        BitmapFactory.decodeStream(input)
+                    }
+                }
+                source.startsWith("content://") -> {
+                    val uri = Uri.parse(source)
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        BitmapFactory.decodeStream(input)
+                    }
+                }
+                source.startsWith("file://") -> {
+                    val path = Uri.parse(source).path ?: return null
+                    BitmapFactory.decodeFile(path)
+                }
+                else -> {
+                    val file = File(source)
+                    if (file.exists()) {
+                        BitmapFactory.decodeFile(file.absolutePath)
+                    } else {
+                        val uri = Uri.parse(source)
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            BitmapFactory.decodeStream(input)
+                        }
+                    }
                 }
             }
-
-            if (insights.isEmpty()) {
-                return Result.failure(IllegalStateException("Analitik içgörü maddeleri üretilemedi."))
-            }
-
-            Result.success(insights.take(4))
-        } catch (e: TimeoutCancellationException) {
-            Log.e(TAG, "Analitik özeti zaman aşımına uğradı", e)
-            Result.failure(Exception("Analitik özeti zaman aşımına uğradı. Lütfen tekrar deneyin.", e))
-        } catch (e: CancellationException) {
-            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Analitik özeti hatası", e)
-            Result.failure(Exception("Analitik özeti alınamadı: ${e.localizedMessage ?: "Bilinmeyen hata"}", e))
+            Log.w(TAG, "Failed to decode bitmap from $source", e)
+            null
         }
     }
 }

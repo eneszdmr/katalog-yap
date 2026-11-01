@@ -1,6 +1,8 @@
 package com.example.ui.screens.publiccatalog
 
 import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
@@ -73,6 +75,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.example.i18n.TrStrings
+import com.example.model.Catalog
 import com.example.model.CustomerCartItem
 import com.example.model.Order
 import com.example.model.OrderItem
@@ -186,52 +189,81 @@ fun PublicCatalogScreen(
         mutableStateOf("ALL")
     }
 
-    // shortId ile eşleşen kataloğu bul (ID, slug, Türkçe normalize slug, kısa kod veya ürün ID geri dönüşü)
-    val matchedRawCatalog = remember(allCatalogs, allProducts, cleanShortId, store.customSlug) {
-        val normalizedTarget = ShareExportGenerator.normalizeTurkishSlug(cleanShortId)
-        if (
-            cleanShortId.isBlank() ||
-            cleanShortId.equals("demo", ignoreCase = true) ||
-            cleanShortId.equals("default", ignoreCase = true) ||
-            cleanShortId.equals("katalog", ignoreCase = true) ||
-            (store.customSlug.isNotBlank() && cleanShortId.equals(store.customSlug, ignoreCase = true))
-        ) {
-            allCatalogs.firstOrNull { it.isActive } ?: allCatalogs.firstOrNull()
-        } else {
-            allCatalogs.find { cat ->
-                val generatedIdCode = ShareExportGenerator.generateShortPath(cat.id, "c").removePrefix("/c/")
-                val generatedSlugCode = ShareExportGenerator.generateShortPath(cat.slug, "c").removePrefix("/c/")
-                val normalizedCatSlug = ShareExportGenerator.normalizeTurkishSlug(cat.slug)
-                val normalizedCatTitle = ShareExportGenerator.normalizeTurkishSlug(cat.title)
-                generatedIdCode.equals(cleanShortId, ignoreCase = true) ||
-                    generatedSlugCode.equals(cleanShortId, ignoreCase = true) ||
-                    cat.id.equals(cleanShortId, ignoreCase = true) ||
-                    cat.slug.equals(cleanShortId, ignoreCase = true) ||
-                    (normalizedTarget.isNotBlank() && (normalizedCatSlug == normalizedTarget || normalizedCatTitle == normalizedTarget))
-            } ?: run {
-                // Eğer bir ürün kısa kodu (/p/xyz) veya ürün ID'si ile açıldıysa o ürünün kataloğunu bul
-                val matchedProduct = allProducts.find { prod ->
-                    val prodShortCode = ShareExportGenerator.generateShortPath(prod.id, "p").removePrefix("/p/")
-                    prod.id.equals(cleanShortId, ignoreCase = true) ||
-                        prodShortCode.equals(cleanShortId, ignoreCase = true)
+    val requestedCatalogKeys = remember(cleanShortId) {
+        cleanShortId
+            .split(",")
+            .map { it.trim().removePrefix("c/klk/").removePrefix("/c/").removePrefix("c/").trim('/') }
+            .filter { it.isNotBlank() }
+    }
+
+    val matchedMultiCatalogs = remember(allCatalogs, allProducts, requestedCatalogKeys, store.customSlug) {
+        fun matchSingleKey(key: String): Catalog? {
+            val normalizedTarget = ShareExportGenerator.normalizeTurkishSlug(key)
+            return if (
+                key.isBlank() ||
+                key.equals("demo", ignoreCase = true) ||
+                key.equals("default", ignoreCase = true) ||
+                key.equals("katalog", ignoreCase = true) ||
+                (store.customSlug.isNotBlank() && key.equals(store.customSlug, ignoreCase = true))
+            ) {
+                allCatalogs.firstOrNull { it.isActive } ?: allCatalogs.firstOrNull()
+            } else {
+                allCatalogs.find { cat ->
+                    val generatedIdCode = ShareExportGenerator.generateShortPath(cat.id, "c").removePrefix("/c/")
+                    val generatedSlugCode = ShareExportGenerator.generateShortPath(cat.slug, "c").removePrefix("/c/")
+                    val normalizedCatSlug = ShareExportGenerator.normalizeTurkishSlug(cat.slug)
+                    val normalizedCatTitle = ShareExportGenerator.normalizeTurkishSlug(cat.title)
+                    generatedIdCode.equals(key, ignoreCase = true) ||
+                        generatedSlugCode.equals(key, ignoreCase = true) ||
+                        cat.id.equals(key, ignoreCase = true) ||
+                        cat.slug.equals(key, ignoreCase = true) ||
+                        (normalizedTarget.isNotBlank() && (normalizedCatSlug == normalizedTarget || normalizedCatTitle == normalizedTarget))
+                } ?: run {
+                    val matchedProduct = allProducts.find { prod ->
+                        val prodShortCode = ShareExportGenerator.generateShortPath(prod.id, "p").removePrefix("/p/")
+                        prod.id.equals(key, ignoreCase = true) ||
+                            prodShortCode.equals(key, ignoreCase = true)
+                    }
+                    matchedProduct?.let { prod -> allCatalogs.find { it.id == prod.catalogId } }
                 }
-                matchedProduct?.let { prod -> allCatalogs.find { it.id == prod.catalogId } }
             }
         }
+
+        if (requestedCatalogKeys.isEmpty()) {
+            listOfNotNull(matchSingleKey(""))
+        } else {
+            requestedCatalogKeys.mapNotNull { matchSingleKey(it) }.distinctBy { it.id }
+        }
+    }
+
+    val matchedRawCatalog = remember(matchedMultiCatalogs) {
+        matchedMultiCatalogs.firstOrNull()
+    }
+
+    var selectedMultiCatalogId by remember(cleanShortId) {
+        mutableStateOf("ALL")
     }
 
     var isFetchingRemote by remember(cleanShortId) { mutableStateOf(false) }
     var remoteFetchAttempted by remember(cleanShortId) { mutableStateOf(false) }
 
-    LaunchedEffect(cleanShortId, matchedRawCatalog?.id, activeReseller?.id) {
-        if (matchedRawCatalog == null && activeReseller == null && !remoteFetchAttempted && cleanShortId.isNotBlank()) {
+    LaunchedEffect(cleanShortId, matchedMultiCatalogs.size, activeReseller?.id) {
+        if (matchedMultiCatalogs.size < requestedCatalogKeys.size.coerceAtLeast(1) && activeReseller == null && !remoteFetchAttempted && cleanShortId.isNotBlank()) {
             isFetchingRemote = true
-            dataService.fetchRemotePublicCatalog(cleanShortId)
+            if (requestedCatalogKeys.size > 1) {
+                requestedCatalogKeys.forEach { key ->
+                    dataService.fetchRemotePublicCatalog(key)
+                }
+            } else {
+                dataService.fetchRemotePublicCatalog(cleanShortId)
+            }
             isFetchingRemote = false
             remoteFetchAttempted = true
-        } else if (matchedRawCatalog != null && !matchedRawCatalog.isActive) {
-            // Paylaşılan katalog açıldığında otomatik olarak yayına al ve senkronize et
-            dataService.ensureCatalogPublishedAndSynced(matchedRawCatalog.id)
+        }
+        matchedMultiCatalogs.forEach { cat ->
+            if (!cat.isActive) {
+                dataService.ensureCatalogPublishedAndSynced(cat.id)
+            }
         }
     }
 
@@ -285,7 +317,14 @@ fun PublicCatalogScreen(
         return
     }
 
-    val catalog = remember(effectiveMatchedCatalog, activeReseller, resellerVisibleCatalogs, selectedResellerCatalogId) {
+    val catalog = remember(
+        effectiveMatchedCatalog,
+        matchedMultiCatalogs,
+        selectedMultiCatalogId,
+        activeReseller,
+        resellerVisibleCatalogs,
+        selectedResellerCatalogId
+    ) {
         if (activeReseller != null) {
             if (selectedResellerCatalogId != "ALL") {
                 resellerVisibleCatalogs.find { it.id == selectedResellerCatalogId }
@@ -293,18 +332,37 @@ fun PublicCatalogScreen(
             } else {
                 resellerVisibleCatalogs.firstOrNull()
             }
+        } else if (matchedMultiCatalogs.size > 1 && selectedMultiCatalogId != "ALL") {
+            matchedMultiCatalogs.find { it.id == selectedMultiCatalogId } ?: effectiveMatchedCatalog
         } else {
             effectiveMatchedCatalog
         }
     }
 
-    // Bayi özel linkindeyse bayiye görünür katalogların ürünlerini al ve bayi fiyat/marj kuralını uygula
-    val catalogProducts = remember(allProducts, catalog, activeReseller, resellerVisibleCatalogs, selectedResellerCatalogId) {
+    // Bayi özel linkindeyse veya çoklu katalog paylaşımındaysa seçili katalogların ürünlerini birleştir
+    val catalogProducts = remember(
+        allProducts,
+        catalog,
+        matchedMultiCatalogs,
+        selectedMultiCatalogId,
+        activeReseller,
+        resellerVisibleCatalogs,
+        selectedResellerCatalogId
+    ) {
         val baseList = if (activeReseller != null) {
             val allowedCatIds = if (selectedResellerCatalogId == "ALL") {
                 resellerVisibleCatalogs.map { it.id }.toSet()
             } else {
                 setOf(selectedResellerCatalogId)
+            }
+            allProducts
+                .filter { it.catalogId in allowedCatIds }
+                .sortedBy { it.sortOrder }
+        } else if (matchedMultiCatalogs.size > 1) {
+            val allowedCatIds = if (selectedMultiCatalogId == "ALL") {
+                matchedMultiCatalogs.map { it.id }.toSet()
+            } else {
+                setOf(selectedMultiCatalogId)
             }
             allProducts
                 .filter { it.catalogId in allowedCatIds }
@@ -327,21 +385,23 @@ fun PublicCatalogScreen(
         }
     }
 
-    // Görsel kaydetme ve ekran görüntüsü alma koruması (opsiyonel ayar)
+    // Görsel kaydetme ve ekran görüntüsü alma koruması (varsayılan pasif: false)
     var protectImages by remember(store.protectImagesFromSaving) {
         mutableStateOf(store.protectImagesFromSaving)
     }
 
-    // Ekran görüntüsü almayı zorlaştırmak için opsiyonel FLAG_SECURE
-    DisposableEffect(protectImages) {
-        val window = (context as? Activity)?.window
+    // Ekran görüntüsü almayı engellemek için Activity penceresine FLAG_SECURE uygula
+    DisposableEffect(protectImages, context) {
+        val window = context.findActivity()?.window
         if (protectImages) {
             window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         } else {
             window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
         }
         onDispose {
-            window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            if (!store.protectImagesFromSaving) {
+                window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            }
         }
     }
 
@@ -501,16 +561,26 @@ fun PublicCatalogScreen(
                     logoUri = store.logoUri,
                     catalogTitle = if (activeReseller != null) {
                         "${activeReseller.name} • Özel Bayi Kataloğu"
+                    } else if (matchedMultiCatalogs.size > 1 && selectedMultiCatalogId == "ALL") {
+                        "${matchedMultiCatalogs.size} Katalog Bir Arada (${matchedMultiCatalogs.joinToString(", ") { it.title }})"
                     } else {
                         catalog?.title ?: store.businessName
                     },
                     catalogDescription = if (activeReseller != null) {
                         "${activeReseller.formatPriceRuleSummary(currencySymbol)} uygulandı • ${resellerVisibleCatalogs.size} katalog erişime açık"
+                    } else if (matchedMultiCatalogs.size > 1 && selectedMultiCatalogId == "ALL") {
+                        "Seçili kataloglar: ${matchedMultiCatalogs.joinToString(" • ") { it.title }}"
                     } else {
                         catalog?.description.orEmpty()
                     },
                     protectImages = protectImages,
-                    onToggleProtectImages = { protectImages = !protectImages },
+                    onToggleProtectImages = {
+                        val nextState = !protectImages
+                        protectImages = nextState
+                        scope.launch {
+                            dataService.updateSettings(store.copy(protectImagesFromSaving = nextState))
+                        }
+                    },
                     onWhatsAppContactClick = {
                         CustomerWhatsAppOrderHelper.openWhatsAppToSeller(
                             context = context,
@@ -537,6 +607,69 @@ fun PublicCatalogScreen(
                     },
                     onBackClick = onBackClick
                 )
+            }
+
+            // 1.2) ÇOKLU KATALOG PAYLAŞIMI SEÇİCİ ÇUBUĞU
+            if (activeReseller == null && matchedMultiCatalogs.size > 1) {
+                item {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("public_multi_catalog_chips")
+                        ) {
+                            item {
+                                val isAll = selectedMultiCatalogId == "ALL"
+                                Surface(
+                                    onClick = { selectedMultiCatalogId = "ALL" },
+                                    shape = BadgeRoundedPill,
+                                    color = if (isAll) PrimaryBlue else SurfaceWhite,
+                                    border = BorderStroke(1.dp, if (isAll) PrimaryBlue else BorderLight)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Outlined.MenuBook,
+                                            contentDescription = null,
+                                            tint = if (isAll) SurfaceWhite else PrimaryBlue,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Text(
+                                            text = "Tüm Seçili Kataloglar (${matchedMultiCatalogs.size})",
+                                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                            color = if (isAll) SurfaceWhite else TextPrimary
+                                        )
+                                    }
+                                }
+                            }
+                            items(matchedMultiCatalogs, key = { it.id }) { mCat ->
+                                val isSelected = selectedMultiCatalogId == mCat.id
+                                Surface(
+                                    onClick = { selectedMultiCatalogId = mCat.id },
+                                    shape = BadgeRoundedPill,
+                                    color = if (isSelected) PrimaryBlue else SurfaceWhite,
+                                    border = BorderStroke(1.dp, if (isSelected) PrimaryBlue else BorderLight)
+                                ) {
+                                    Text(
+                                        text = mCat.title,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = if (isSelected) SurfaceWhite else TextSecondary,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // 1.5) BAYİ ÖZEL PORTAL BANNERI VE GÖRÜNÜR KATALOG SEÇİCİ
@@ -867,7 +1000,7 @@ fun PublicCatalogScreen(
                     )
                     if (totalCartItemsCount > 0) {
                         Text(
-                            text = "${totalCartPrice.roundToInt()} $currencySymbol",
+                            text = com.example.model.formatMultiCurrencyCartTotals(cartItems.toList(), currencySymbol),
                             style = MaterialTheme.typography.labelSmall,
                             color = SurfaceWhite.copy(alpha = 0.9f)
                         )
@@ -915,8 +1048,28 @@ fun PublicCatalogScreen(
         isVisible = showOrderFormSheet,
         cartItems = cartItems.toList(),
         currencySymbol = currencySymbol,
+        onUpdateQuantity = { key, newQty ->
+            val idx = cartItems.indexOfFirst { it.key == key }
+            if (idx >= 0) {
+                if (newQty <= 0) {
+                    cartItems.removeAt(idx)
+                } else {
+                    cartItems[idx] = cartItems[idx].copy(quantity = newQty)
+                }
+            }
+        },
         onDismiss = { showOrderFormSheet = false },
         onSubmitOrder = { fullName, phone, address, note ->
+            val multiCurrencySummary = com.example.model.formatMultiCurrencyCartTotals(
+                cartItems.toList(),
+                currencySymbol
+            )
+            val distinctCurrencies = cartItems.map { it.product.currency.ifBlank { currencySymbol } }.distinct()
+            val effectiveOrderCurrency = if (distinctCurrencies.size == 1) {
+                distinctCurrencies.first()
+            } else {
+                multiCurrencySummary
+            }
             val orderItems = cartItems.map { item ->
                 OrderItem(
                     productId = item.product.id,
@@ -924,7 +1077,8 @@ fun PublicCatalogScreen(
                     quantity = item.quantity,
                     unitPrice = item.unitPrice,
                     selectedVariantSummary = item.variantSummary,
-                    imageUrl = item.product.imageUrl
+                    imageUrl = item.product.imageUrl,
+                    currency = item.product.currency.ifBlank { currencySymbol }
                 )
             }
             val safeCustomerName = InputSanitizer.sanitizeForStorage(fullName, maxLength = 120)
@@ -935,22 +1089,27 @@ fun PublicCatalogScreen(
             val newOrder = Order(
                 id = "ord-${UUID.randomUUID().toString().take(8)}",
                 catalogId = catalog?.id.orEmpty(),
-                catalogTitle = catalog?.title ?: store.businessName,
+                catalogTitle = if (matchedMultiCatalogs.size > 1 && selectedMultiCatalogId == "ALL") {
+                    matchedMultiCatalogs.joinToString(", ") { it.title }
+                } else {
+                    catalog?.title ?: store.businessName
+                },
                 customerName = safeCustomerName,
                 customerPhone = safeCustomerPhone,
                 customerAddress = safeCustomerAddress,
                 customerNote = safeCustomerNote,
                 items = orderItems,
                 totalAmount = totalCartPrice,
-                currency = currencySymbol,
+                currency = effectiveOrderCurrency,
                 status = OrderStatus.NEW,
                 resellerId = activeReseller?.id.orEmpty(),
                 resellerName = activeReseller?.name.orEmpty()
             )
             val waMessage = CustomerWhatsAppOrderHelper.buildSellerOrderWhatsAppMessage(
                 storeName = store.businessName,
-                catalogTitle = catalog?.title ?: store.businessName,
-                order = newOrder
+                catalogTitle = newOrder.catalogTitle,
+                order = newOrder,
+                multiCurrencySummary = multiCurrencySummary
             )
 
             scope.launch {
@@ -1360,3 +1519,10 @@ private fun PublicCustomerProductCard(
         }
     }
 }
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+

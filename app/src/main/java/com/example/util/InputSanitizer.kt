@@ -46,8 +46,9 @@ object InputSanitizer {
      * Kısa kod / URL slug temizleme (yalnızca güvenli alfanümerik ve tire karakterleri).
      */
     fun sanitizeSlugOrShortId(input: String): String {
-        return sanitizeLiveInput(input, 120)
-            .replace(Regex("[^a-zA-Z0-9\\-_/:]"), "")
+        return sanitizeLiveInput(input, 400)
+            .replace(Regex("[^a-zA-Z0-9\\-_/:,]"), "")
+            .trim(',')
             .trim()
     }
 }

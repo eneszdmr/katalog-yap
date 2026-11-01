@@ -128,7 +128,8 @@ data class OrderItem(
     val quantity: Int,
     val unitPrice: Double,
     val selectedVariantSummary: String = "",
-    val imageUrl: String = ""
+    val imageUrl: String = "",
+    val currency: String = "₺"
 )
 
 data class Order(
@@ -163,6 +164,30 @@ data class CustomerCartItem(
 ) {
     val variantSummary: String
         get() = selectedVariants.entries.joinToString(" • ") { "${it.key}: ${it.value}" }
+
+    val effectiveCurrency: String
+        get() = product.currency.ifBlank { "₺" }
+
+    val availableStock: Int
+        get() = if (product.trackStock) product.stockCount.coerceAtLeast(0) else Int.MAX_VALUE
+
+    val isExceedingStock: Boolean
+        get() = product.trackStock && quantity > product.stockCount.coerceAtLeast(0)
+}
+
+fun formatMultiCurrencyCartTotals(
+    cartItems: List<CustomerCartItem>,
+    fallbackCurrency: String = "₺"
+): String {
+    if (cartItems.isEmpty()) return "0 $fallbackCurrency"
+    val grouped = LinkedHashMap<String, Double>()
+    cartItems.forEach { item ->
+        val curr = item.product.currency.ifBlank { fallbackCurrency }
+        grouped[curr] = (grouped[curr] ?: 0.0) + (item.unitPrice * item.quantity)
+    }
+    return grouped.entries.joinToString(" + ") { (curr, sum) ->
+        "${kotlin.math.round(sum).toInt()} $curr"
+    }
 }
 
 data class CatalogAnalyticsEvent(
@@ -285,12 +310,12 @@ data class StoreSettings(
     // 1) İşletme Profili
     val businessName: String = "Vera Tasarım Butik",
     val businessType: String = BusinessType.CLOTHING.labelTr,
-    val logoUri: String = "https://picsum.photos/seed/vera-logo/300/300",
+    val logoUri: String = "",
     val phoneWhatsapp: String = "+90 532 410 20 30",
     val city: String = "İstanbul",
     val businessAddress: String = "Bağdat Cad. Suadiye Mah. No: 142/B Kadıköy / İstanbul",
     val instagramUrl: String = "instagram.com/veratasarimbutik",
-    val websiteUrl: String = "https://constantinopolishotel.store",
+    val websiteUrl: String = "",
     val facebookUrl: String = "facebook.com/veratasarimbutik",
     // 2) Mağaza Ayarları
     val currencyCode: String = CurrencyOption.TRY.code,
@@ -303,10 +328,10 @@ data class StoreSettings(
     val shippingFee: Double = 49.0,
     val orderConfirmationTemplate: String = "Merhaba {musteri_adi}, {siparis_no} numaralı {toplam_tutar} tutarındaki siparişiniz başarıyla alınmıştır. Hazırlandığında kargo bilgisi paylaşılacaktır.",
     // 3) Katalog Görünümü
-    val catalogThemeColorHex: String = "#2563EB",
+    val catalogThemeColorHex: String = "#0F766E",
     val catalogGridColumns: Int = 2,
     val catalogShowPrices: Boolean = true,
-    val protectImagesFromSaving: Boolean = true,
+    val protectImagesFromSaving: Boolean = false,
     // 4) Bildirimler
     val notificationsEnabled: Boolean = true,
     val notifyNewOrder: Boolean = true,
@@ -333,7 +358,7 @@ data class StoreSettings(
                 city = "",
                 businessAddress = "",
                 instagramUrl = "",
-                websiteUrl = "https://constantinopolishotel.store",
+                websiteUrl = "",
                 facebookUrl = "",
                 currencyCode = CurrencyOption.TRY.code,
                 currencySymbol = CurrencyOption.TRY.symbol,
@@ -344,7 +369,7 @@ data class StoreSettings(
                 minOrderAmount = 0.0,
                 shippingFee = 0.0,
                 orderConfirmationTemplate = "Merhaba {musteri_adi}, {siparis_no} numaralı {toplam_tutar} tutarındaki siparişiniz başarıyla alınmıştır. Hazırlandığında kargo bilgisi paylaşılacaktır.",
-                catalogThemeColorHex = "#2563EB",
+                catalogThemeColorHex = "#0F766E",
                 catalogGridColumns = 2,
                 catalogShowPrices = true,
                 protectImagesFromSaving = false,

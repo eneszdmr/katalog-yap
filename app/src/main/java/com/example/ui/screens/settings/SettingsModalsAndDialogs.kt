@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -117,15 +118,6 @@ fun EditBusinessProfileModal(
         }
     }
 
-    val presetLogos = remember {
-        listOf(
-            "https://picsum.photos/seed/vera-logo/300/300",
-            "https://picsum.photos/seed/boutique-brand/300/300",
-            "https://picsum.photos/seed/decor-studio/300/300",
-            "https://picsum.photos/seed/atelier-logo/300/300"
-        )
-    }
-
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -170,16 +162,30 @@ fun EditBusinessProfileModal(
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    AsyncImage(
-                        model = logoUri.ifBlank { "https://picsum.photos/seed/vera-logo/300/300" },
-                        contentDescription = "İşletme Logosu",
-                        contentScale = ContentScale.Crop,
+                    val cleanLogoUri = logoUri.takeIf { it.isNotBlank() && !it.contains("picsum.photos") }.orEmpty()
+                    Box(
                         modifier = Modifier
                             .size(64.dp)
                             .clip(RoundedCornerShape(16.dp))
                             .border(1.5.dp, PrimaryBlue, RoundedCornerShape(16.dp))
-                            .background(SurfaceMuted)
-                    )
+                            .background(SurfaceMuted),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Image,
+                            contentDescription = null,
+                            tint = TextSecondary.copy(alpha = 0.5f),
+                            modifier = Modifier.size(28.dp)
+                        )
+                        if (cleanLogoUri.isNotBlank()) {
+                            AsyncImage(
+                                model = cleanLogoUri,
+                                contentDescription = "İşletme Logosu",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    }
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "İşletme Logosu",
@@ -200,27 +206,6 @@ fun EditBusinessProfileModal(
                                 tag = "btn_pick_business_logo"
                             )
                         }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(presetLogos) { preset ->
-                        val isSelected = logoUri == preset
-                        AsyncImage(
-                            model = preset,
-                            contentDescription = "Hazır Logo",
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .size(42.dp)
-                                .clip(CircleShape)
-                                .border(
-                                    width = if (isSelected) 2.5.dp else 1.dp,
-                                    color = if (isSelected) PrimaryBlue else BorderLight,
-                                    shape = CircleShape
-                                )
-                                .clickable { logoUri = preset }
-                        )
                     }
                 }
 

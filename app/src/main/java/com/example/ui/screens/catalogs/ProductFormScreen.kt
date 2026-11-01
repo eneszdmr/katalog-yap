@@ -186,22 +186,25 @@ fun ProductFormScreen(
     LaunchedEffect(editingProduct) {
         if (!initialized && editingProduct != null) {
             val prod = editingProduct
-            images = if (prod.galleryUrls.isNotEmpty()) {
-                prod.galleryUrls.take(10)
-            } else if (prod.imageUrl.isNotBlank()) {
-                listOf(prod.imageUrl)
-            } else {
-                emptyList()
+            val cleanGallery = prod.galleryUrls.filter { it.isNotBlank() && !it.contains("picsum.photos") }
+            val cleanSingle = prod.imageUrl.takeIf { it.isNotBlank() && !it.contains("picsum.photos") }
+            images = when {
+                cleanGallery.isNotEmpty() -> cleanGallery.take(10)
+                cleanSingle != null -> listOf(cleanSingle)
+                else -> emptyList()
             }
             name = prod.name
             description = prod.description
 
             // Eğer originalPrice varsa, originalPrice normal fiyattır ve price indirimli fiyattır
-            if (prod.originalPrice != null && prod.originalPrice > prod.price) {
+            if (prod.originalPrice != null && prod.originalPrice > prod.price && prod.price > 0.0) {
                 regularPriceInput = prod.originalPrice.toInt().toString()
                 discountedPriceInput = prod.price.toInt().toString()
-            } else {
+            } else if (prod.price > 0.0) {
                 regularPriceInput = prod.price.toInt().toString()
+                discountedPriceInput = ""
+            } else {
+                regularPriceInput = ""
                 discountedPriceInput = ""
             }
             selectedCurrencySymbol = prod.currency.ifBlank { "₺" }
@@ -387,12 +390,7 @@ fun ProductFormScreen(
             else -> StockStatus.IN_STOCK
         }
 
-        val finalImages = if (images.isNotEmpty()) {
-            images
-        } else {
-            val seed = cleanName.lowercase().replace(" ", "-")
-            listOf("https://picsum.photos/seed/$seed/800/800")
-        }
+        val finalImages = images.filter { it.isNotBlank() && !it.contains("picsum.photos") }
 
         val productToSave = Product(
             id = editingProduct?.id ?: "prod-${UUID.randomUUID().toString().take(8)}",
@@ -402,7 +400,7 @@ fun ProductFormScreen(
             price = effectivePrice,
             originalPrice = effectiveOriginalPrice,
             currency = selectedCurrencySymbol,
-            imageUrl = finalImages.first(),
+            imageUrl = finalImages.firstOrNull().orEmpty(),
             galleryUrls = finalImages,
             category = category.trim().ifBlank { "Giyim" },
             subCategory = subCategory.trim().ifBlank { "Genel" },
@@ -534,8 +532,9 @@ fun ProductFormScreen(
                     },
                     onAddDemoImage = {
                         if (images.size < 10) {
-                            val demoUrl = "https://picsum.photos/seed/katalog-prod-${System.currentTimeMillis() % 1000}/800/800"
-                            images = (images + demoUrl).take(10)
+                            galleryLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            )
                         }
                     },
                     onMoveImage = { fromIdx, toIdx ->

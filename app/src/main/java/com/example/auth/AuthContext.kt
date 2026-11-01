@@ -135,22 +135,42 @@ class AuthContextState(
 
     /**
      * Jetpack Credential Manager (`GetSignInWithGoogleOption`) + Firebase Auth ile gerçek Google girişi.
+     * Eğer cihazda SHA-1 / OAuth yapılandırma farkı nedeniyle Play Services `RESULT_CANCELED` döndürürse
+     * `onFallbackAccountPickerRequired` ile sistem Google hesap seçicisini devreye sokar.
      */
     fun loginWithGoogleFirebase(
         activityContext: Context,
+        onFallbackAccountPickerRequired: (() -> Unit)? = null,
         onSuccess: (needsOnboarding: Boolean, displayName: String) -> Unit,
         onError: (String) -> Unit
     ) {
         scope.launch {
             val firebaseUser = FirebaseGoogleAuthHelper.signInWithGoogleInteractive(
                 context = activityContext,
+                onFallbackAccountPickerRequired = onFallbackAccountPickerRequired,
                 onError = onError
             ) ?: return@launch
 
-            val email = firebaseUser.email.orEmpty()
-            val displayName = firebaseUser.displayName?.takeIf { it.isNotBlank() }
+            completeGoogleSignInWithProfile(
+                profile = firebaseUser,
+                onSuccess = onSuccess
+            )
+        }
+    }
+
+    /**
+     * Doğrulanmış Google profili (Credential Manager veya Sistem Google Hesap Seçici) ile
+     * kullanıcıya özel mağaza ve katalog oturumunu başlatır.
+     */
+    fun completeGoogleSignInWithProfile(
+        profile: GoogleSignInProfile,
+        onSuccess: (needsOnboarding: Boolean, displayName: String) -> Unit
+    ) {
+        scope.launch {
+            val email = profile.email.trim()
+            val displayName = profile.displayName.takeIf { it.isNotBlank() }
                 ?: email.substringBefore("@").ifBlank { "Google Kullanıcısı" }
-            val phone = firebaseUser.phoneNumber?.takeIf { it.isNotBlank() }
+            val phone = profile.phoneNumber?.takeIf { it.isNotBlank() }
                 ?: "+90 532 000 00 00"
 
             val (_, needsOnboarding) = dataService.activateUserAccountSession(
@@ -158,7 +178,7 @@ class AuthContextState(
                 phoneNumber = phone.removePrefix("+90").trim(),
                 passwordHash = "",
                 recoveryEmail = email,
-                firebaseUid = firebaseUser.uid,
+                firebaseUid = profile.uid,
                 provider = "google",
                 displayNameHint = displayName
             )

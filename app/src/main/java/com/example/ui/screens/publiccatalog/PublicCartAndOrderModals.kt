@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -68,6 +69,7 @@ import com.example.ui.components.KYModal
 import com.example.ui.theme.BorderLight
 import com.example.ui.theme.ButtonRoundedXl
 import com.example.ui.theme.DangerRed
+import com.example.ui.theme.DangerRedLight
 import com.example.ui.theme.PrimaryBlue
 import com.example.ui.theme.PrimaryBlueSubtle
 import com.example.ui.theme.SuccessGreen
@@ -80,7 +82,8 @@ import kotlin.math.roundToInt
 
 /**
  * SEPET ALT ÇEKMECESİ:
- * - Ürünler, varyant bilgisi, adet artır/azalt (+ / -), toplam tutar ve "Siparişi Gönder" butonu
+ * - Ürünler, kendi döviz tipleri (₺, $, €), adet artır/azalt (+ / -), stok aşım uyarısı,
+ *   çoklu döviz toplam tutar (Örn: 100 $ + 250 ₺) ve "Siparişi Gönder" butonu
  */
 @Composable
 fun PublicCartBottomSheet(
@@ -93,11 +96,14 @@ fun PublicCartBottomSheet(
 ) {
     if (!isVisible) return
 
-    val totalAmount = remember(cartItems) {
-        cartItems.sumOf { it.unitPrice * it.quantity }
+    val multiCurrencyTotalText = remember(cartItems, currencySymbol) {
+        com.example.model.formatMultiCurrencyCartTotals(cartItems, currencySymbol)
     }
     val totalItemCount = remember(cartItems) {
         cartItems.sumOf { it.quantity }
+    }
+    val outOfStockItems = remember(cartItems) {
+        cartItems.filter { it.isExceedingStock }
     }
 
     KYBottomSheet(
@@ -119,6 +125,35 @@ fun PublicCartBottomSheet(
                     .testTag("public_cart_sheet"),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                if (outOfStockItems.isNotEmpty()) {
+                    Surface(
+                        shape = ButtonRoundedXl,
+                        color = DangerRedLight,
+                        border = BorderStroke(1.dp, DangerRed.copy(alpha = 0.45f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("cart_stock_warning_banner")
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "Stok Sınırı Aşıldı",
+                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                color = DangerRed
+                            )
+                            outOfStockItems.forEach { overItem ->
+                                Text(
+                                    text = "• ${overItem.product.name}: Bu üründen istediğiniz sayıda yok (Mevcut stok: ${overItem.product.stockCount} adet, Sepette: ${overItem.quantity} adet).",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = DangerRed
+                                )
+                            }
+                        }
+                    }
+                }
+
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -126,94 +161,122 @@ fun PublicCartBottomSheet(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(cartItems, key = { it.key }) { item ->
+                        val itemCurrency = item.product.currency.ifBlank { currencySymbol }
                         Surface(
                             shape = ButtonRoundedXl,
-                            color = SurfaceWhite,
-                            border = BorderStroke(1.dp, BorderLight),
+                            color = if (item.isExceedingStock) DangerRedLight.copy(alpha = 0.35f) else SurfaceWhite,
+                            border = BorderStroke(
+                                1.dp,
+                                if (item.isExceedingStock) DangerRed.copy(alpha = 0.55f) else BorderLight
+                            ),
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(10.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                AsyncImage(
-                                    model = item.product.imageUrl,
-                                    contentDescription = item.product.name,
-                                    contentScale = ContentScale.Crop,
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Row(
                                     modifier = Modifier
-                                        .size(56.dp)
-                                        .clip(ButtonRoundedXl)
-                                        .background(SurfaceMuted)
-                                )
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = item.product.name,
-                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                                        color = TextPrimary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    if (item.variantSummary.isNotBlank()) {
+                                        .fillMaxWidth()
+                                        .padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(56.dp)
+                                            .clip(ButtonRoundedXl)
+                                            .background(SurfaceMuted),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Outlined.ShoppingBag,
+                                            contentDescription = null,
+                                            tint = TextSecondary.copy(alpha = 0.4f),
+                                            modifier = Modifier.size(24.dp)
+                                        )
+                                        if (item.product.imageUrl.isNotBlank()) {
+                                            AsyncImage(
+                                                model = item.product.imageUrl,
+                                                contentDescription = item.product.name,
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
                                         Text(
-                                            text = item.variantSummary,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = TextSecondary
+                                            text = item.product.name,
+                                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                                            color = TextPrimary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (item.variantSummary.isNotBlank()) {
+                                            Text(
+                                                text = item.variantSummary,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = TextSecondary
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = "${(item.unitPrice * item.quantity).roundToInt()} $itemCurrency",
+                                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                            color = PrimaryBlue
                                         )
                                     }
-                                    Spacer(modifier = Modifier.height(2.dp))
-                                    Text(
-                                        text = "${(item.unitPrice * item.quantity).roundToInt()} $currencySymbol",
-                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                                        color = PrimaryBlue
-                                    )
+
+                                    // Adet Artır / Azalt (- / +)
+                                    Surface(
+                                        shape = ButtonRoundedXl,
+                                        color = SurfaceMuted
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            IconButton(
+                                                onClick = { onUpdateQuantity(item.key, item.quantity - 1) },
+                                                modifier = Modifier
+                                                    .size(32.dp)
+                                                    .testTag("cart_qty_dec_${item.product.id}")
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (item.quantity <= 1) {
+                                                        Icons.Outlined.DeleteOutline
+                                                    } else {
+                                                        Icons.Outlined.Remove
+                                                    },
+                                                    contentDescription = "Azalt",
+                                                    tint = if (item.quantity <= 1) DangerRed else TextPrimary,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
+                                            Text(
+                                                text = item.quantity.toString(),
+                                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                                color = if (item.isExceedingStock) DangerRed else TextPrimary,
+                                                modifier = Modifier.padding(horizontal = 6.dp)
+                                            )
+                                            IconButton(
+                                                onClick = { onUpdateQuantity(item.key, item.quantity + 1) },
+                                                modifier = Modifier
+                                                    .size(32.dp)
+                                                    .testTag("cart_qty_inc_${item.product.id}")
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Filled.Add,
+                                                    contentDescription = "Artır",
+                                                    tint = PrimaryBlue,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
+                                        }
+                                    }
                                 }
 
-                                // Adet Artır / Azalt (- / +)
-                                Surface(
-                                    shape = ButtonRoundedXl,
-                                    color = SurfaceMuted
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        IconButton(
-                                            onClick = { onUpdateQuantity(item.key, item.quantity - 1) },
-                                            modifier = Modifier
-                                                .size(32.dp)
-                                                .testTag("cart_qty_dec_${item.product.id}")
-                                        ) {
-                                            Icon(
-                                                imageVector = if (item.quantity <= 1) {
-                                                    Icons.Outlined.DeleteOutline
-                                                } else {
-                                                    Icons.Outlined.Remove
-                                                },
-                                                contentDescription = "Azalt",
-                                                tint = if (item.quantity <= 1) DangerRed else TextPrimary,
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                        }
-                                        Text(
-                                            text = item.quantity.toString(),
-                                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                                            color = TextPrimary,
-                                            modifier = Modifier.padding(horizontal = 6.dp)
-                                        )
-                                        IconButton(
-                                            onClick = { onUpdateQuantity(item.key, item.quantity + 1) },
-                                            modifier = Modifier
-                                                .size(32.dp)
-                                                .testTag("cart_qty_inc_${item.product.id}")
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Filled.Add,
-                                                contentDescription = "Artır",
-                                                tint = PrimaryBlue,
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                        }
-                                    }
+                                if (item.isExceedingStock) {
+                                    Text(
+                                        text = "⚠️ Bu üründen istediğiniz sayıda yok (Mevcut stok: ${item.product.stockCount} adet)",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                        color = DangerRed,
+                                        modifier = Modifier.padding(start = 10.dp, end = 10.dp, bottom = 8.dp)
+                                    )
                                 }
                             }
                         }
@@ -222,7 +285,7 @@ fun PublicCartBottomSheet(
 
                 HorizontalDivider(color = BorderLight)
 
-                // Toplam Tutar Şeridi
+                // Toplam Tutar Şeridi (Çoklu Döviz Destekli: Örn 100 $ + 250 ₺)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -234,7 +297,7 @@ fun PublicCartBottomSheet(
                         color = TextSecondary
                     )
                     Text(
-                        text = "${totalAmount.roundToInt()} $currencySymbol",
+                        text = multiCurrencyTotalText,
                         style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
                         color = PrimaryBlue
                     )
@@ -255,7 +318,9 @@ fun PublicCartBottomSheet(
 }
 
 /**
- * SİPARİŞ FORMU ALT ÇEKMECESİ:
+ * SİPARİŞ TALEBİ FORMU ALT ÇEKMECESİ:
+ * - Seçilen ürünlerin listesi, adet (+ / -) düzenleme kontrolleri ve stok aşımı kontrolü
+ * - Çoklu döviz toplam gösterimi (Örn: 100 $ + 250 ₺)
  * - Ad soyad, telefon, adres, not
  * - Gönderilince siparişi "Yeni" durumuyla kaydeder, WhatsApp mesajını oluşturup wa.me ile açar ve başarı ekranını gösterir.
  */
@@ -264,6 +329,7 @@ fun PublicOrderFormBottomSheet(
     isVisible: Boolean,
     cartItems: List<CustomerCartItem>,
     currencySymbol: String,
+    onUpdateQuantity: (key: String, newQty: Int) -> Unit = { _, _ -> },
     onDismiss: () -> Unit,
     onSubmitOrder: (fullName: String, phone: String, address: String, note: String) -> Unit
 ) {
@@ -277,10 +343,15 @@ fun PublicOrderFormBottomSheet(
     var nameError by remember { mutableStateOf<String?>(null) }
     var phoneError by remember { mutableStateOf<String?>(null) }
     var addressError by remember { mutableStateOf<String?>(null) }
+    var stockErrorBanner by remember { mutableStateOf<String?>(null) }
 
-    val totalAmount = remember(cartItems) {
-        cartItems.sumOf { it.unitPrice * it.quantity }
+    val multiCurrencyTotalText = remember(cartItems, currencySymbol) {
+        com.example.model.formatMultiCurrencyCartTotals(cartItems, currencySymbol)
     }
+    val outOfStockItems = remember(cartItems) {
+        cartItems.filter { it.isExceedingStock }
+    }
+    val hasStockError = outOfStockItems.isNotEmpty()
 
     KYBottomSheet(
         isVisible = true,
@@ -291,11 +362,168 @@ fun PublicOrderFormBottomSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = 520.dp)
+                .heightIn(max = 560.dp)
                 .verticalScroll(rememberScrollState())
                 .testTag("public_order_form_sheet"),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            // 1) SİPARİŞ EDİLECEK ÜRÜNLER VE ADET (+ / -) KONTROLLERİ
+            Surface(
+                shape = ButtonRoundedXl,
+                color = SurfaceWhite,
+                border = BorderStroke(1.dp, BorderLight),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("order_form_products_list")
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Sipariş Edilecek Ürünler (${cartItems.sumOf { it.quantity }} Adet)",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = multiCurrencyTotalText,
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                            color = PrimaryBlue
+                        )
+                    }
+
+                    HorizontalDivider(color = BorderLight)
+
+                    cartItems.forEach { item ->
+                        val itemCurr = item.product.currency.ifBlank { currencySymbol }
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("order_form_item_${item.product.id}")
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = item.product.name,
+                                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                                        color = TextPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    val variantText = if (item.variantSummary.isNotBlank()) " • ${item.variantSummary}" else ""
+                                    Text(
+                                        text = "${item.unitPrice.roundToInt()} $itemCurr x ${item.quantity} = ${(item.unitPrice * item.quantity).roundToInt()} $itemCurr$variantText",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = PrimaryBlue
+                                    )
+                                }
+
+                                // Adet Artır / Azalt (- / +)
+                                Surface(
+                                    shape = ButtonRoundedXl,
+                                    color = SurfaceMuted
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        IconButton(
+                                            onClick = {
+                                                stockErrorBanner = null
+                                                onUpdateQuantity(item.key, item.quantity - 1)
+                                            },
+                                            modifier = Modifier
+                                                .size(32.dp)
+                                                .testTag("order_form_qty_dec_${item.product.id}")
+                                        ) {
+                                            Icon(
+                                                imageVector = if (item.quantity <= 1) {
+                                                    Icons.Outlined.DeleteOutline
+                                                } else {
+                                                    Icons.Outlined.Remove
+                                                },
+                                                contentDescription = "Azalt",
+                                                tint = if (item.quantity <= 1) DangerRed else TextPrimary,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                        Text(
+                                            text = "${item.quantity} adet",
+                                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                            color = if (item.isExceedingStock) DangerRed else TextPrimary,
+                                            modifier = Modifier.padding(horizontal = 6.dp)
+                                        )
+                                        IconButton(
+                                            onClick = {
+                                                stockErrorBanner = null
+                                                onUpdateQuantity(item.key, item.quantity + 1)
+                                            },
+                                            modifier = Modifier
+                                                .size(32.dp)
+                                                .testTag("order_form_qty_inc_${item.product.id}")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Filled.Add,
+                                                contentDescription = "Artır",
+                                                tint = PrimaryBlue,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (item.isExceedingStock) {
+                                Surface(
+                                    shape = ButtonRoundedXl,
+                                    color = DangerRedLight,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(top = 4.dp)
+                                        .testTag("order_form_stock_error_${item.product.id}")
+                                ) {
+                                    Text(
+                                        text = "⚠️ Bu üründen istediğiniz sayıda yok! (Stokta en fazla ${item.product.stockCount} adet mevcut, seçilen: ${item.quantity} adet)",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                        color = DangerRed,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (hasStockError || stockErrorBanner != null) {
+                Surface(
+                    shape = ButtonRoundedXl,
+                    color = DangerRedLight,
+                    border = BorderStroke(1.dp, DangerRed.copy(alpha = 0.5f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("order_form_stock_warning_banner")
+                ) {
+                    val msg = stockErrorBanner ?: outOfStockItems.joinToString("\n") { over ->
+                        "• ${over.product.name}: Bu üründen istediğiniz sayıda yok (Mevcut stok: ${over.product.stockCount} adet)."
+                    }
+                    Text(
+                        text = msg,
+                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                        color = DangerRed,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            }
+
             KYInput(
                 value = fullName,
                 onValueChange = {
@@ -351,7 +579,7 @@ fun PublicOrderFormBottomSheet(
                 tag = "input_order_customer_note"
             )
 
-            // Sipariş Özeti Kutusu
+            // Sipariş Özeti Kutusu (Çoklu Döviz Destekli: Örn 100 $ + 250 ₺)
             Surface(
                 shape = ButtonRoundedXl,
                 color = PrimaryBlueSubtle,
@@ -368,7 +596,7 @@ fun PublicOrderFormBottomSheet(
                         color = TextPrimary
                     )
                     Text(
-                        text = "${totalAmount.roundToInt()} $currencySymbol",
+                        text = multiCurrencyTotalText,
                         style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                         color = PrimaryBlue
                     )
@@ -379,6 +607,14 @@ fun PublicOrderFormBottomSheet(
                 text = TrStrings.PublicCatalog.BTN_SUBMIT_ORDER,
                 onClick = {
                     var valid = true
+                    if (cartItems.isEmpty()) {
+                        stockErrorBanner = "Sepetinizde ürün bulunmuyor."
+                        valid = false
+                    } else if (hasStockError) {
+                        val firstOver = outOfStockItems.first()
+                        stockErrorBanner = "'${firstOver.product.name}' ürününden istediğiniz sayıda yok (Stokta en fazla ${firstOver.product.stockCount} adet mevcut). Lütfen adeti azaltın."
+                        valid = false
+                    }
                     if (fullName.trim().length < 2) {
                         nameError = TrStrings.PublicCatalog.ERROR_NAME_REQUIRED
                         valid = false
@@ -400,6 +636,7 @@ fun PublicOrderFormBottomSheet(
                         )
                     }
                 },
+                enabled = cartItems.isNotEmpty() && !hasStockError,
                 variant = ButtonVariant.PRIMARY,
                 leadingIcon = Icons.Outlined.Send,
                 modifier = Modifier.fillMaxWidth(),
@@ -500,22 +737,36 @@ object CustomerWhatsAppOrderHelper {
     fun buildSellerOrderWhatsAppMessage(
         storeName: String,
         catalogTitle: String,
-        order: Order
+        order: Order,
+        multiCurrencySummary: String = ""
     ): String {
+        val groupedByCurrency = LinkedHashMap<String, Double>()
+        order.items.forEach { item ->
+            val curr = item.currency.ifBlank { order.currency.ifBlank { "₺" } }
+            groupedByCurrency[curr] = (groupedByCurrency[curr] ?: 0.0) + (item.unitPrice * item.quantity)
+        }
+        val effectiveTotalLine = multiCurrencySummary.ifBlank {
+            if (groupedByCurrency.isNotEmpty()) {
+                groupedByCurrency.entries.joinToString(" + ") { (c, sum) -> "${sum.roundToInt()} $c" }
+            } else {
+                "${order.totalAmount.roundToInt()} ${order.currency}"
+            }
+        }
         return buildString {
             append("🛍️ *YENİ SİPARİŞ — $storeName*\n")
             append("📒 Katalog: $catalogTitle\n")
             append("🔖 Sipariş No: #${order.id.takeLast(6).uppercase()}\n\n")
             append("📦 *Sipariş Edilen Ürünler:*\n")
             order.items.forEachIndexed { idx, item ->
+                val itemCurr = item.currency.ifBlank { order.currency.ifBlank { "₺" } }
                 val lineTotal = (item.unitPrice * item.quantity).roundToInt()
                 val variantPart = if (item.selectedVariantSummary.isNotBlank()) {
                     " (${item.selectedVariantSummary})"
                 } else ""
                 append("${idx + 1}. ${item.productName}$variantPart\n")
-                append("   ${item.quantity} adet x ${item.unitPrice.roundToInt()} ${order.currency} = *$lineTotal ${order.currency}*\n")
+                append("   ${item.quantity} adet x ${item.unitPrice.roundToInt()} $itemCurr = *$lineTotal $itemCurr*\n")
             }
-            append("\n💰 *TOPLAM TUTAR: ${order.totalAmount.roundToInt()} ${order.currency}*\n\n")
+            append("\n💰 *TOPLAM TUTAR: $effectiveTotalLine*\n\n")
             append("👤 *Müşteri Bilgileri:*\n")
             append("• Ad Soyad: ${order.customerName}\n")
             append("• Telefon: ${order.customerPhone}\n")

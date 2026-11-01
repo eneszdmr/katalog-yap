@@ -34,6 +34,7 @@ import androidx.compose.material.icons.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Merge
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -199,6 +200,7 @@ fun CatalogsDraftScreen(
     var showMergeModal by remember { mutableStateOf(false) }
 
     var sharingCatalog by remember { mutableStateOf<Catalog?>(null) }
+    var sharingCatalogIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var previewingCatalog by remember { mutableStateOf<Catalog?>(null) }
 
     Box(
@@ -213,6 +215,10 @@ fun CatalogsDraftScreen(
                 MultiSelectTopBar(
                     selectedCount = selectedCatalogIds.size,
                     onClearSelection = { selectedCatalogIds = emptySet() },
+                    onShareClick = {
+                        sharingCatalogIds = selectedCatalogIds
+                        sharingCatalog = catalogs.firstOrNull { it.id in selectedCatalogIds }
+                    },
                     onAddTagClick = { taggingCatalogIds = selectedCatalogIds },
                     onMergeClick = {
                         if (selectedCatalogIds.size < 2) {
@@ -662,7 +668,7 @@ fun CatalogsDraftScreen(
                         title = title,
                         description = description,
                         slug = cleanSlug,
-                        coverImageUrl = "https://picsum.photos/seed/$newId/600/600",
+                        coverImageUrl = "",
                         tags = tags,
                         isActive = true,
                         productCount = 0,
@@ -787,10 +793,20 @@ fun CatalogsDraftScreen(
 
     // Kapsamlı Paylaşım Alt Çekmecesi (Link, PDF Broşür, Görsel Canvas, Çoklu Katalog + Ayarlar)
     KYShareBottomSheet(
-        isVisible = sharingCatalog != null,
+        isVisible = sharingCatalog != null || sharingCatalogIds.isNotEmpty(),
         catalog = sharingCatalog,
         product = null,
-        onDismiss = { sharingCatalog = null },
+        initialOption = if (sharingCatalogIds.size > 1) {
+            com.example.model.ShareOptionType.MULTI_CATALOG
+        } else {
+            com.example.model.ShareOptionType.LINK
+        },
+        initialSelectedCatalogIds = sharingCatalogIds,
+        onDismiss = {
+            sharingCatalog = null
+            sharingCatalogIds = emptySet()
+            if (isSelectionMode) selectedCatalogIds = emptySet()
+        },
         onShowToast = onShowToast,
         onOpenPublicCatalog = onOpenPublicCatalog
     )
@@ -953,6 +969,7 @@ private fun StoreHeaderTopBar(
 private fun MultiSelectTopBar(
     selectedCount: Int,
     onClearSelection: () -> Unit,
+    onShareClick: () -> Unit,
     onAddTagClick: () -> Unit,
     onMergeClick: () -> Unit,
     onDeleteClick: () -> Unit
@@ -995,6 +1012,32 @@ private fun MultiSelectTopBar(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // Çoklu Paylaş
+                    Surface(
+                        onClick = onShareClick,
+                        shape = ButtonRoundedXl,
+                        color = PrimaryBlue,
+                        modifier = Modifier.testTag("multi_action_share")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Share,
+                                contentDescription = null,
+                                tint = SurfaceWhite,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Paylaş",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                color = SurfaceWhite
+                            )
+                        }
+                    }
+
                     // Etiket ekle
                     Surface(
                         onClick = onAddTagClick,

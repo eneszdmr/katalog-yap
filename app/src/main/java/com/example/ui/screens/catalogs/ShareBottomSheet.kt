@@ -39,6 +39,7 @@ import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Send
 import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -128,11 +129,13 @@ fun KYShareBottomSheet(
     isVisible: Boolean,
     catalog: Catalog? = null,
     product: Product? = null,
+    initialOption: ShareOptionType = ShareOptionType.LINK,
+    initialSelectedCatalogIds: Set<String> = emptySet(),
     onDismiss: () -> Unit,
     onShowToast: (KYToastData) -> Unit,
     onOpenPublicCatalog: ((String) -> Unit)? = null
 ) {
-    if (!isVisible || (catalog == null && product == null)) return
+    if (!isVisible || (catalog == null && product == null && initialSelectedCatalogIds.isEmpty())) return
 
     val context = LocalContext.current
     val dataService = remember { LocalStorageDataService.getInstance(context) }
@@ -143,8 +146,8 @@ fun KYShareBottomSheet(
     val allCatalogs by dataService.catalogs.collectAsState()
     val allProducts by dataService.products.collectAsState()
 
-    val targetCatalog = remember(catalog, product, allCatalogs) {
-        val lookupId = catalog?.id ?: product?.catalogId
+    val targetCatalog = remember(catalog, product, allCatalogs, initialSelectedCatalogIds) {
+        val lookupId = catalog?.id ?: product?.catalogId ?: initialSelectedCatalogIds.firstOrNull()
         allCatalogs.find { it.id == lookupId } ?: catalog ?: allCatalogs.firstOrNull()
     }
 
@@ -153,10 +156,16 @@ fun KYShareBottomSheet(
 
     // Paylaşım penceresi açıldığında kataloğun yayında (isActive = true) olduğundan ve
     // MariaDB + Firebase Firestore + Web vitriniyle anında senkronize edildiğinden emin ol
-    LaunchedEffect(isVisible, targetCatalog?.id) {
-        if (isVisible && targetCatalog != null) {
+    LaunchedEffect(isVisible, targetCatalog?.id, initialSelectedCatalogIds) {
+        if (isVisible) {
             isSyncingToWeb = true
-            dataService.ensureCatalogPublishedAndSynced(targetCatalog.id)
+            if (initialSelectedCatalogIds.isNotEmpty()) {
+                initialSelectedCatalogIds.forEach { cid ->
+                    dataService.ensureCatalogPublishedAndSynced(cid)
+                }
+            } else if (targetCatalog != null) {
+                dataService.ensureCatalogPublishedAndSynced(targetCatalog.id)
+            }
             isSyncingToWeb = false
             isSyncedToWeb = true
         }
@@ -172,7 +181,11 @@ fun KYShareBottomSheet(
     }
 
     // Aktif Paylaşım Seçeneği (1: Link, 2: PDF Broşür, 3: Görsel Canvas, 4: Çoklu Katalog Koleksiyonu)
-    var selectedOption by remember { mutableStateOf(ShareOptionType.LINK) }
+    var selectedOption by remember(initialOption, initialSelectedCatalogIds) {
+        mutableStateOf(
+            if (initialSelectedCatalogIds.size > 1) ShareOptionType.MULTI_CATALOG else initialOption
+        )
+    }
 
     // Paylaşım Ayarları (Fiyat göster/gizle, Şifre, Son kullanma tarihi, Bayi marjı)
     var shareSettings by remember { mutableStateOf(ShareSettings()) }
@@ -195,11 +208,11 @@ fun KYShareBottomSheet(
     var isGeneratingImage by remember { mutableStateOf(false) }
 
     // 4) Çoklu Katalog Koleksiyonu Durumu
-    var selectedCollectionCatalogIds by remember(targetCatalog, allCatalogs) {
-        val initial = if (targetCatalog != null) {
-            setOf(targetCatalog.id)
-        } else {
-            allCatalogs.take(2).map { it.id }.toSet()
+    var selectedCollectionCatalogIds by remember(targetCatalog, allCatalogs, initialSelectedCatalogIds) {
+        val initial = when {
+            initialSelectedCatalogIds.isNotEmpty() -> initialSelectedCatalogIds
+            targetCatalog != null -> setOf(targetCatalog.id)
+            else -> allCatalogs.map { it.id }.toSet()
         }
         mutableStateOf(initial)
     }
@@ -567,10 +580,11 @@ fun KYShareBottomSheet(
                 //    seçilenleri tek bir "koleksiyon" linkine birleştir.
                 // =========================================================================
                 ShareOptionType.MULTI_CATALOG -> {
-                    val firstSelectedCatalogSlug = allCatalogs
-                        .firstOrNull { it.id in selectedCollectionCatalogIds }
-                        ?.let { it.slug.ifBlank { it.id } }
-                        .orEmpty()
+                    val selectedCatalogsList = allCatalogs.filter { it.id in selectedCollectionCatalogIds }
+                    val multiCatalogSlugsKey = selectedCatalogsList
+                        .map { it.slug.ifBlank { it.id } }
+                        .filter { it.isNotBlank() }
+                        .joinToString(",")
                     val collectionSeed = selectedCollectionCatalogIds.sorted().joinToString("-")
                         .ifBlank { "koleksiyon" }
                     val collectionShortPath = ShareExportGenerator.generateShortPath(
@@ -580,7 +594,7 @@ fun KYShareBottomSheet(
                     val collectionUrl = ShareExportGenerator.generateFullShortUrl(
                         shortPath = collectionShortPath,
                         settings = shareSettings,
-                        catalogSlugOrId = firstSelectedCatalogSlug
+                        catalogSlugOrId = multiCatalogSlugsKey
                     )
 
                     MultiCatalogCollectionShareContent(
@@ -605,21 +619,55 @@ fun KYShareBottomSheet(
                                     )
                                 )
                             } else {
-                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                                clipboard?.setPrimaryClip(ClipData.newPlainText(collectionTitle, collectionUrl))
-                                recordEvent(
-                                    channel = "collection_link",
-                                    link = collectionUrl,
-                                    overrideType = "collection",
-                                    overrideTitle = collectionTitle,
-                                    catIds = selectedCollectionCatalogIds.toList()
-                                )
-                                onShowToast(
-                                    KYToastData(
-                                        message = TrStrings.Catalogs.TOAST_LINK_COPIED,
-                                        type = KYToastType.SUCCESS
+                                scope.launch {
+                                    isSyncingToWeb = true
+                                    selectedCollectionCatalogIds.forEach { cid ->
+                                        dataService.ensureCatalogPublishedAndSynced(cid)
+                                    }
+                                    isSyncingToWeb = false
+                                    val refreshedCatalogs = dataService.catalogs.value.filter { it.id in selectedCollectionCatalogIds }
+                                    val refreshedSlugsKey = refreshedCatalogs
+                                        .map { it.slug.ifBlank { it.id } }
+                                        .filter { it.isNotBlank() }
+                                        .joinToString(",")
+                                        .ifBlank { multiCatalogSlugsKey }
+                                    val resolvedCollectionUrl = ShareExportGenerator.generateFullShortUrl(
+                                        shortPath = collectionShortPath,
+                                        settings = shareSettings,
+                                        catalogSlugOrId = refreshedSlugsKey
                                     )
-                                )
+                                    val clipboardText = if (refreshedCatalogs.size > 1) {
+                                        buildString {
+                                            appendLine("📚 $collectionTitle (${refreshedCatalogs.size} Katalog):")
+                                            appendLine("🔗 Koleksiyon Linki: $resolvedCollectionUrl")
+                                            refreshedCatalogs.forEachIndexed { idx, c ->
+                                                val singleUrl = ShareExportGenerator.generateFullShortUrl(
+                                                    shortPath = ShareExportGenerator.generateShortPath(c.id, "c"),
+                                                    settings = shareSettings,
+                                                    catalogSlugOrId = c.slug.ifBlank { c.id }
+                                                )
+                                                appendLine("${idx + 1}. ${c.title}: $singleUrl")
+                                            }
+                                        }.trim()
+                                    } else {
+                                        resolvedCollectionUrl
+                                    }
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                    clipboard?.setPrimaryClip(ClipData.newPlainText(collectionTitle, clipboardText))
+                                    recordEvent(
+                                        channel = "collection_link",
+                                        link = resolvedCollectionUrl,
+                                        overrideType = "collection",
+                                        overrideTitle = collectionTitle,
+                                        catIds = selectedCollectionCatalogIds.toList()
+                                    )
+                                    onShowToast(
+                                        KYToastData(
+                                            message = "${refreshedCatalogs.size} katalog bağlantısı panoya kopyalandı",
+                                            type = KYToastType.SUCCESS
+                                        )
+                                    )
+                                }
                             }
                         },
                         onWhatsAppCollectionShare = {
@@ -631,26 +679,80 @@ fun KYShareBottomSheet(
                                     )
                                 )
                             } else {
-                                val chosenTitles = allCatalogs
-                                    .filter { it.id in selectedCollectionCatalogIds }
-                                    .joinToString(", ") { it.title }
-                                recordEvent(
-                                    channel = "collection_whatsapp",
-                                    link = collectionUrl,
-                                    overrideType = "collection",
-                                    overrideTitle = collectionTitle,
-                                    catIds = selectedCollectionCatalogIds.toList()
-                                )
-                                ShareExportGenerator.shareToWhatsApp(
-                                    context = context,
-                                    title = collectionTitle,
-                                    shortUrl = collectionUrl,
-                                    store = store,
-                                    settings = shareSettings,
-                                    extraSummary = "${selectedCollectionCatalogIds.size} Katalog Bir Arada: $chosenTitles"
-                                )
+                                scope.launch {
+                                    isSyncingToWeb = true
+                                    selectedCollectionCatalogIds.forEach { cid ->
+                                        dataService.ensureCatalogPublishedAndSynced(cid)
+                                    }
+                                    isSyncingToWeb = false
+                                    val refreshedCatalogs = dataService.catalogs.value.filter { it.id in selectedCollectionCatalogIds }
+                                    val refreshedSlugsKey = refreshedCatalogs
+                                        .map { it.slug.ifBlank { it.id } }
+                                        .filter { it.isNotBlank() }
+                                        .joinToString(",")
+                                        .ifBlank { multiCatalogSlugsKey }
+                                    val resolvedCollectionUrl = ShareExportGenerator.generateFullShortUrl(
+                                        shortPath = collectionShortPath,
+                                        settings = shareSettings,
+                                        catalogSlugOrId = refreshedSlugsKey
+                                    )
+                                    val perCatalogLinksSummary = buildString {
+                                        appendLine("${refreshedCatalogs.size} Katalog Bir Arada:")
+                                        refreshedCatalogs.forEachIndexed { index, catItem ->
+                                            val singleUrl = ShareExportGenerator.generateFullShortUrl(
+                                                shortPath = ShareExportGenerator.generateShortPath(catItem.id, "c"),
+                                                settings = shareSettings,
+                                                catalogSlugOrId = catItem.slug.ifBlank { catItem.id }
+                                            )
+                                            appendLine("• ${index + 1}. ${catItem.title} (${catItem.productCount} ürün): $singleUrl")
+                                        }
+                                    }.trim()
+                                    recordEvent(
+                                        channel = "collection_whatsapp",
+                                        link = resolvedCollectionUrl,
+                                        overrideType = "collection",
+                                        overrideTitle = collectionTitle,
+                                        catIds = selectedCollectionCatalogIds.toList()
+                                    )
+                                    ShareExportGenerator.shareToWhatsApp(
+                                        context = context,
+                                        title = collectionTitle,
+                                        shortUrl = resolvedCollectionUrl,
+                                        store = store,
+                                        settings = shareSettings,
+                                        extraSummary = perCatalogLinksSummary
+                                    )
+                                }
                             }
-                        }
+                        },
+                        onOpenMultiCatalogPreview = if (onOpenPublicCatalog != null) {
+                            {
+                                if (selectedCollectionCatalogIds.isEmpty()) {
+                                    onShowToast(
+                                        KYToastData(
+                                            message = TrStrings.Share.ERROR_MIN_CATALOGS,
+                                            type = KYToastType.ERROR
+                                        )
+                                    )
+                                } else {
+                                    scope.launch {
+                                        isSyncingToWeb = true
+                                        selectedCollectionCatalogIds.forEach { cid ->
+                                            dataService.ensureCatalogPublishedAndSynced(cid)
+                                        }
+                                        isSyncingToWeb = false
+                                        val refreshedCatalogs = dataService.catalogs.value.filter { it.id in selectedCollectionCatalogIds }
+                                        val refreshedSlugsKey = refreshedCatalogs
+                                            .map { it.slug.ifBlank { it.id } }
+                                            .filter { it.isNotBlank() }
+                                            .joinToString(",")
+                                            .ifBlank { multiCatalogSlugsKey }
+                                        onDismiss()
+                                        onOpenPublicCatalog.invoke(refreshedSlugsKey)
+                                    }
+                                }
+                            }
+                        } else null
                     )
                 }
             }
@@ -1501,7 +1603,8 @@ private fun MultiCatalogCollectionShareContent(
     onCollectionTitleChange: (String) -> Unit,
     onToggleCatalogSelection: (String) -> Unit,
     onCopyCollectionLink: () -> Unit,
-    onWhatsAppCollectionShare: () -> Unit
+    onWhatsAppCollectionShare: () -> Unit,
+    onOpenMultiCatalogPreview: (() -> Unit)? = null
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         KYInput(
@@ -1561,15 +1664,28 @@ private fun MultiCatalogCollectionShareContent(
                             colors = CheckboxDefaults.colors(checkedColor = PrimaryBlue)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        AsyncImage(
-                            model = cat.coverImageUrl,
-                            contentDescription = cat.title,
-                            contentScale = ContentScale.Crop,
+                        Box(
                             modifier = Modifier
                                 .size(44.dp)
                                 .clip(ButtonRoundedXl)
-                                .background(SurfaceMuted)
-                        )
+                                .background(SurfaceMuted),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.CollectionsBookmark,
+                                contentDescription = null,
+                                tint = TextSecondary.copy(alpha = 0.4f),
+                                modifier = Modifier.size(20.dp)
+                            )
+                            if (cat.coverImageUrl.isNotBlank()) {
+                                AsyncImage(
+                                    model = cat.coverImageUrl,
+                                    contentDescription = cat.title,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
+                        }
                         Spacer(modifier = Modifier.width(10.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
@@ -1639,5 +1755,17 @@ private fun MultiCatalogCollectionShareContent(
                 tag = "btn_whatsapp_collection_link"
             )
         }
+
+        if (onOpenMultiCatalogPreview != null) {
+            KYButton(
+                text = "Seçilen Katalogları Birlikte Önizle (${selectedCatalogIds.size} Katalog)",
+                onClick = onOpenMultiCatalogPreview,
+                variant = ButtonVariant.GHOST,
+                leadingIcon = Icons.Outlined.Visibility,
+                modifier = Modifier.fillMaxWidth(),
+                tag = "btn_preview_multi_catalog"
+            )
+        }
     }
 }
+

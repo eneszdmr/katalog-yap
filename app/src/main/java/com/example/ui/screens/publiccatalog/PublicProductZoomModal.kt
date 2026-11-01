@@ -59,12 +59,17 @@ import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.compose.ui.window.SecureFlagPolicy
+import android.view.WindowManager
 import coil.compose.AsyncImage
 import com.example.i18n.TrStrings
 import com.example.model.Product
@@ -110,14 +115,12 @@ fun PublicProductZoomModal(
         (product.trackStock && product.stockCount <= 0)
 
     val galleryUrls = remember(product) {
-        if (product.galleryUrls.isNotEmpty()) {
-            product.galleryUrls
-        } else {
-            listOf(
-                product.imageUrl,
-                "https://picsum.photos/seed/${product.id}-z1/800/800",
-                "https://picsum.photos/seed/${product.id}-z2/800/800"
-            )
+        val cleanGallery = product.galleryUrls.filter { it.isNotBlank() && !it.contains("picsum.photos") }
+        val cleanSingle = product.imageUrl.takeIf { it.isNotBlank() && !it.contains("picsum.photos") }
+        when {
+            cleanGallery.isNotEmpty() -> cleanGallery
+            cleanSingle != null -> listOf(cleanSingle)
+            else -> listOf("")
         }
     }
 
@@ -151,12 +154,33 @@ fun PublicProductZoomModal(
         onDismissRequest = onDismiss,
         properties = DialogProperties(
             usePlatformDefaultWidth = false,
-            dismissOnBackPress = true
+            dismissOnBackPress = true,
+            securePolicy = if (protectImages) SecureFlagPolicy.SecureOn else SecureFlagPolicy.Inherit
         )
     ) {
+        val dialogView = LocalView.current
+        DisposableEffect(protectImages, dialogView) {
+            val dialogWindow = (dialogView.parent as? DialogWindowProvider)?.window
+            if (protectImages) {
+                dialogWindow?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            } else {
+                dialogWindow?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            }
+            onDispose {
+                dialogWindow?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            }
+        }
+
         Scaffold(
             modifier = Modifier
                 .fillMaxSize()
+                .pointerInput(protectImages) {
+                    if (protectImages) {
+                        detectTapGestures(
+                            onLongPress = { onImageSaveBlocked() }
+                        )
+                    }
+                }
                 .testTag("public_product_detail_modal"),
             containerColor = BackgroundSlate,
             contentWindowInsets = WindowInsets(0.dp, 0.dp, 0.dp, 0.dp),
@@ -317,20 +341,35 @@ fun PublicProductZoomModal(
                                     }
                                 }
                         ) {
-                            AsyncImage(
-                                model = galleryUrls[page],
-                                contentDescription = product.name,
-                                contentScale = ContentScale.Crop,
-                                colorFilter = grayscaleFilter,
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .graphicsLayer(
-                                        scaleX = scale,
-                                        scaleY = scale,
-                                        translationX = offset.x,
-                                        translationY = offset.y
+                            val imgUrl = galleryUrls[page]
+                            if (imgUrl.isNotBlank()) {
+                                AsyncImage(
+                                    model = imgUrl,
+                                    contentDescription = product.name,
+                                    contentScale = ContentScale.Crop,
+                                    colorFilter = grayscaleFilter,
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .graphicsLayer(
+                                            scaleX = scale,
+                                            scaleY = scale,
+                                            translationX = offset.x,
+                                            translationY = offset.y
+                                        )
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Outlined.ShoppingBag,
+                                        contentDescription = null,
+                                        tint = SurfaceWhite.copy(alpha = 0.45f),
+                                        modifier = Modifier.size(64.dp)
                                     )
-                            )
+                                }
+                            }
                         }
                     }
 

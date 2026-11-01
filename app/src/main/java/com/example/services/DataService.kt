@@ -473,16 +473,26 @@ class LocalStorageDataService(context: Context) : DataService {
         mariaDbEngine.activeBusinessId = accKey
 
         val loadedSettings = readSettings(accKey)
-        val persistedLogo = if (loadedSettings.logoUri.isNotBlank()) {
-            com.example.util.ImageCompressionUtil.persistStoreLogo(appContext, loadedSettings.logoUri, accKey)
+        val cleanLogoSource = loadedSettings.logoUri.takeIf { !it.contains("picsum.photos") }.orEmpty()
+        val persistedLogo = if (cleanLogoSource.isNotBlank()) {
+            com.example.util.ImageCompressionUtil.persistStoreLogo(appContext, cleanLogoSource, accKey)
         } else {
             ""
         }
         _settings.value = loadedSettings.copy(logoUri = persistedLogo)
 
         val hasSeeded = prefs.getBoolean(scopedKey(KEY_INITIAL_SEEDED, accKey), false)
-        val loadedCatalogs = readCatalogs(accKey)
-        val loadedProducts = readProducts(accKey)
+        val loadedCatalogs = readCatalogs(accKey).map { cat ->
+            cat.copy(
+                coverImageUrl = cat.coverImageUrl.takeIf { !it.contains("picsum.photos") }.orEmpty()
+            )
+        }
+        val loadedProducts = readProducts(accKey).map { prod ->
+            prod.copy(
+                imageUrl = prod.imageUrl.takeIf { !it.contains("picsum.photos") }.orEmpty(),
+                galleryUrls = prod.galleryUrls.filterNot { it.contains("picsum.photos") }
+            )
+        }
 
         if (!hasSeeded && loadedCatalogs.isEmpty()) {
             val (sampleCatalogs, sampleProducts) = buildSampleCatalogsAndProducts(accKey)
@@ -739,10 +749,12 @@ class LocalStorageDataService(context: Context) : DataService {
             catalog.slug
         }
         val resolvedSlug = ensureUniqueSlug(rawSlugSource, catalog.id)
-        val resolvedCover = catalog.coverImageUrl.ifBlank {
-            _products.value.firstOrNull { it.catalogId == catalog.id }?.imageUrl
-                ?: "https://picsum.photos/seed/${resolvedSlug.ifBlank { catalog.id }}/600/600"
-        }
+        val resolvedCover = catalog.coverImageUrl
+            .takeIf { !it.contains("picsum.photos") }
+            .orEmpty()
+            .ifBlank {
+                _products.value.firstOrNull { it.catalogId == catalog.id && !it.imageUrl.contains("picsum.photos") }?.imageUrl.orEmpty()
+            }
         val productCount = _products.value.count { it.catalogId == catalog.id }
         val normalized = catalog.copy(
             slug = resolvedSlug,
@@ -884,9 +896,8 @@ class LocalStorageDataService(context: Context) : DataService {
         val combinedTags = selectedCatalogs.flatMap { it.tags }.distinct()
         val totalViews = selectedCatalogs.sumOf { it.viewCount }
         val totalOrders = selectedCatalogs.sumOf { it.orderCount }
-        val firstCover = selectedCatalogs.firstOrNull { it.coverImageUrl.isNotBlank() }?.coverImageUrl
-            ?: clonedProducts.firstOrNull()?.imageUrl
-            ?: "https://picsum.photos/seed/merged-catalog/600/600"
+        val firstCover = selectedCatalogs.firstOrNull { it.coverImageUrl.isNotBlank() && !it.coverImageUrl.contains("picsum.photos") }?.coverImageUrl
+            ?: clonedProducts.firstOrNull { !it.imageUrl.contains("picsum.photos") }?.imageUrl.orEmpty()
 
         val finalTitle = mergedTitle.trim().ifBlank {
             "${selectedCatalogs.first().title} + ${selectedCatalogs.size - 1} Katalog"
@@ -930,13 +941,7 @@ class LocalStorageDataService(context: Context) : DataService {
         val cleanTitle = title.trim().ifBlank { "Fotoğraf Kataloğu" }
         val currencySymbol = _settings.value.currencySymbol.ifBlank { "₺" }
 
-        val effectiveUrls = if (photoUrls.isNotEmpty()) {
-            photoUrls
-        } else {
-            (1..8).map { idx ->
-                "https://picsum.photos/seed/photo-cat-${newCatalogId.take(4)}-$idx/600/600"
-            }
-        }
+        val effectiveUrls = photoUrls.filter { it.isNotBlank() && !it.contains("picsum.photos") }
 
         val createdProducts = effectiveUrls.mapIndexed { idx, url ->
             Product(
@@ -944,10 +949,10 @@ class LocalStorageDataService(context: Context) : DataService {
                 catalogId = newCatalogId,
                 name = "$cleanTitle Ürün #${idx + 1}",
                 description = "Fotoğraflardan otomatik oluşturulan ürün kartı",
-                price = (250 + idx * 75).toDouble(),
+                price = 0.0,
                 currency = currencySymbol,
                 imageUrl = url,
-                galleryUrls = listOf(url),
+                galleryUrls = if (url.isNotBlank()) listOf(url) else emptyList(),
                 subCategory = if (idx % 2 == 0) "Yeni Gelenler" else "Özel Seçki",
                 stockStatus = StockStatus.IN_STOCK,
                 stockCount = 20,
@@ -963,7 +968,7 @@ class LocalStorageDataService(context: Context) : DataService {
             title = cleanTitle,
             description = "${createdProducts.size} ürün fotoğrafından otomatik oluşturuldu.",
             slug = ensureUniqueSlug(cleanTitle, newCatalogId),
-            coverImageUrl = createdProducts.first().imageUrl,
+            coverImageUrl = createdProducts.firstOrNull()?.imageUrl.orEmpty(),
             tags = listOfNotNull(tag?.trim()?.takeIf { it.isNotBlank() }, "Yeni Sezon").distinct(),
             isActive = true,
             productCount = createdProducts.size,
@@ -997,17 +1002,18 @@ class LocalStorageDataService(context: Context) : DataService {
         val currencySymbol = _settings.value.currencySymbol.ifBlank { "₺" }
 
         val createdProducts = drafts.mapIndexed { idx, draft ->
+            val cleanUri = draft.imageUri.takeIf { !it.contains("picsum.photos") }.orEmpty()
             Product(
                 id = UUID.randomUUID().toString(),
                 catalogId = newCatalogId,
                 name = draft.productName.trim().ifBlank { "$cleanTitle Ürün #${idx + 1}" },
                 description = draft.description.trim().ifBlank { "Yapay zeka ile oluşturulan koleksiyon ürünü." },
-                price = draft.price.coerceAtLeast(1.0),
+                price = draft.price.coerceAtLeast(0.0),
                 currency = currencySymbol,
-                imageUrl = draft.imageUri,
-                galleryUrls = listOf(draft.imageUri),
+                imageUrl = cleanUri,
+                galleryUrls = if (cleanUri.isNotBlank()) listOf(cleanUri) else emptyList(),
                 category = draft.category.trim().ifBlank { "Giyim" },
-                subCategory = draft.subCategory.trim().ifBlank { "Yeni Gelenler" },
+                subCategory = "Yeni Gelenler",
                 tags = draft.tags.map { it.trim().removePrefix("#") }.filter { it.isNotBlank() }.distinct(),
                 stockStatus = StockStatus.IN_STOCK,
                 stockCount = 20,
@@ -1024,7 +1030,7 @@ class LocalStorageDataService(context: Context) : DataService {
             title = cleanTitle,
             description = "Gemini AI ile ${createdProducts.size} fotoğraftan otomatik analiz edilerek oluşturuldu.",
             slug = slugify(cleanTitle),
-            coverImageUrl = createdProducts.first().imageUrl,
+            coverImageUrl = createdProducts.firstOrNull()?.imageUrl.orEmpty(),
             tags = (listOfNotNull(tag?.trim()?.takeIf { it.isNotBlank() }, "Yeni Sezon") + allDraftTags).distinct(),
             isActive = true,
             productCount = createdProducts.size,
@@ -1065,9 +1071,8 @@ class LocalStorageDataService(context: Context) : DataService {
             val price = parts.getOrNull(1)
                 ?.replace("[^0-9.]".toRegex(), "")
                 ?.toDoubleOrNull()
-                ?: (390.0 + idx * 60.0)
+                ?: 0.0
             val sku = parts.getOrNull(2)?.takeIf { it.isNotBlank() } ?: "CSV-${200 + idx}"
-            val mainImg = "https://picsum.photos/seed/csv-${slugify(name)}-$idx/600/600"
 
             Product(
                 id = UUID.randomUUID().toString(),
@@ -1076,12 +1081,8 @@ class LocalStorageDataService(context: Context) : DataService {
                 description = "Excel/CSV tablosundan içe aktarıldı",
                 price = price,
                 currency = currencySymbol,
-                imageUrl = mainImg,
-                galleryUrls = listOf(
-                    mainImg,
-                    "https://picsum.photos/seed/csv-gal-$idx-1/600/600",
-                    "https://picsum.photos/seed/csv-gal-$idx-2/600/600"
-                ),
+                imageUrl = "",
+                galleryUrls = emptyList(),
                 subCategory = if (idx % 2 == 0) "Kış Sezonu" else "Aksesuar",
                 stockStatus = StockStatus.IN_STOCK,
                 stockCount = 30,
@@ -1367,21 +1368,15 @@ class LocalStorageDataService(context: Context) : DataService {
                 cleanStock <= threshold -> StockStatus.LOW_STOCK
                 else -> StockStatus.IN_STOCK
             }
-            val mainImg = prod.imageUrl.ifBlank {
-                "https://picsum.photos/seed/csv-imp-${slugify(prod.name)}-$idx/600/600"
-            }
+            val mainImg = prod.imageUrl.takeIf { !it.contains("picsum.photos") }.orEmpty()
             prod.copy(
                 id = prod.id.ifBlank { UUID.randomUUID().toString() },
                 catalogId = targetCatId,
                 currency = prod.currency.ifBlank { currencySymbol },
                 imageUrl = mainImg,
-                galleryUrls = if (prod.galleryUrls.isEmpty()) {
-                    listOf(
-                        mainImg,
-                        "https://picsum.photos/seed/csv-imp-gal1-$idx/600/600",
-                        "https://picsum.photos/seed/csv-imp-gal2-$idx/600/600"
-                    )
-                } else prod.galleryUrls,
+                galleryUrls = prod.galleryUrls.filterNot { it.contains("picsum.photos") }.ifEmpty {
+                    if (mainImg.isNotBlank()) listOf(mainImg) else emptyList()
+                },
                 trackStock = true,
                 stockCount = cleanStock,
                 stockStatus = status,
@@ -2379,7 +2374,8 @@ class LocalStorageDataService(context: Context) : DataService {
                                     quantity = itemObj.optInt("quantity", 1),
                                     unitPrice = itemObj.optDouble("unitPrice", 0.0),
                                     selectedVariantSummary = itemObj.optString("selectedVariantSummary", ""),
-                                    imageUrl = itemObj.optString("imageUrl", "")
+                                    imageUrl = itemObj.optString("imageUrl", ""),
+                                    currency = itemObj.optString("currency", obj.optString("currency", "₺"))
                                 )
                             )
                         }
@@ -2470,6 +2466,7 @@ class LocalStorageDataService(context: Context) : DataService {
                         put("unitPrice", item.unitPrice)
                         put("selectedVariantSummary", item.selectedVariantSummary)
                         put("imageUrl", item.imageUrl)
+                        put("currency", item.currency)
                     }
                 )
             }
@@ -2611,6 +2608,12 @@ class LocalStorageDataService(context: Context) : DataService {
                 defaults.teamMembers
             }
 
+            val rawWebUrl = obj.optString("websiteUrl", defaults.websiteUrl).trim()
+            val cleanWebsiteUrl = if (
+                rawWebUrl.equals("https://constantinopolishotel.store", ignoreCase = true) ||
+                rawWebUrl.equals("constantinopolishotel.store", ignoreCase = true)
+            ) "" else rawWebUrl
+
             StoreSettings(
                 businessName = obj.optString("businessName", defaults.businessName),
                 businessType = obj.optString("businessType", defaults.businessType),
@@ -2619,7 +2622,7 @@ class LocalStorageDataService(context: Context) : DataService {
                 city = obj.optString("city", defaults.city),
                 businessAddress = obj.optString("businessAddress", defaults.businessAddress),
                 instagramUrl = obj.optString("instagramUrl", defaults.instagramUrl),
-                websiteUrl = obj.optString("websiteUrl", defaults.websiteUrl),
+                websiteUrl = cleanWebsiteUrl,
                 facebookUrl = obj.optString("facebookUrl", defaults.facebookUrl),
                 currencyCode = obj.optString("currencyCode", defaults.currencyCode),
                 currencySymbol = obj.optString("currencySymbol", defaults.currencySymbol),
@@ -2633,7 +2636,7 @@ class LocalStorageDataService(context: Context) : DataService {
                 catalogThemeColorHex = obj.optString("catalogThemeColorHex", defaults.catalogThemeColorHex),
                 catalogGridColumns = obj.optInt("catalogGridColumns", defaults.catalogGridColumns).coerceIn(1, 3),
                 catalogShowPrices = obj.optBoolean("catalogShowPrices", defaults.catalogShowPrices),
-                protectImagesFromSaving = obj.optBoolean("protectImagesFromSaving", defaults.protectImagesFromSaving),
+                protectImagesFromSaving = obj.optBoolean("protectImagesFromSaving", false),
                 notificationsEnabled = obj.optBoolean("notificationsEnabled", defaults.notificationsEnabled),
                 notifyNewOrder = obj.optBoolean("notifyNewOrder", defaults.notifyNewOrder),
                 notifyLowStock = obj.optBoolean("notifyLowStock", defaults.notifyLowStock),
@@ -2805,14 +2808,13 @@ class LocalStorageDataService(context: Context) : DataService {
         )
 
         val specs = listOf(
-            SeedSpec("Örnek Ürün 1 - Keten Gömlek", 890.0, 1150.0, "Yeni Sezon", StockStatus.IN_STOCK, 25),
-            SeedSpec("Örnek Ürün 2 - Palazzo Pantolon", 1150.0, null, "Yeni Sezon", StockStatus.IN_STOCK, 18),
-            SeedSpec("Örnek Ürün 3 - Seramik Vazo Seti", 640.0, 820.0, "Özel Seçki", StockStatus.LOW_STOCK, 4),
-            SeedSpec("Örnek Ürün 4 - Kablosuz Şarj Standı", 950.0, 1190.0, "Popüler", StockStatus.IN_STOCK, 30)
+            SeedSpec("Örnek Ürün 1 - Keten Gömlek", 0.0, null, "Yeni Sezon", StockStatus.IN_STOCK, 25),
+            SeedSpec("Örnek Ürün 2 - Palazzo Pantolon", 0.0, null, "Yeni Sezon", StockStatus.IN_STOCK, 18),
+            SeedSpec("Örnek Ürün 3 - Seramik Vazo Seti", 0.0, null, "Özel Seçki", StockStatus.LOW_STOCK, 4),
+            SeedSpec("Örnek Ürün 4 - Kablosuz Şarj Standı", 0.0, null, "Popüler", StockStatus.IN_STOCK, 30)
         )
 
         val sampleProducts = specs.mapIndexed { idx, spec ->
-            val mainImg = "https://picsum.photos/seed/katalog-fashion-${idx + 11}/600/600"
             Product(
                 id = if (suffix == "demo") "prod-cat1-$idx" else "prod-$suffix-$idx",
                 catalogId = catId,
@@ -2821,11 +2823,8 @@ class LocalStorageDataService(context: Context) : DataService {
                 price = spec.price,
                 originalPrice = spec.originalPrice,
                 currency = "₺",
-                imageUrl = mainImg,
-                galleryUrls = listOf(
-                    mainImg,
-                    "https://picsum.photos/seed/katalog-fashion-${idx + 11}-detail1/600/600"
-                ),
+                imageUrl = "",
+                galleryUrls = emptyList(),
                 subCategory = spec.subCat,
                 stockStatus = spec.stock,
                 stockCount = spec.count,
@@ -2842,7 +2841,7 @@ class LocalStorageDataService(context: Context) : DataService {
             title = "Test Deneme Kataloğu",
             description = "Bu örnek kataloğu ister düzenleyin ister silin; yeni katalog oluşturup tek tıkla WhatsApp'tan paylaşabilirsiniz.",
             slug = catSlug,
-            coverImageUrl = sampleProducts.first().imageUrl,
+            coverImageUrl = "",
             tags = listOf("Yeni Sezon", "Örnek"),
             isActive = true,
             productCount = sampleProducts.size,
@@ -2889,7 +2888,7 @@ class LocalStorageDataService(context: Context) : DataService {
                         quantity = 2,
                         unitPrice = p1?.price ?: 890.0,
                         selectedVariantSummary = "Beden: M • Renk: Ekru",
-                        imageUrl = p1?.imageUrl ?: "https://picsum.photos/seed/katalog-fashion-11/600/600"
+                        imageUrl = p1?.imageUrl.orEmpty()
                     ),
                     OrderItem(
                         productId = p2?.id ?: "prod-cat1-1",
@@ -2897,7 +2896,7 @@ class LocalStorageDataService(context: Context) : DataService {
                         quantity = 1,
                         unitPrice = p2?.price ?: 1150.0,
                         selectedVariantSummary = "Beden: S • Renk: Antrasit",
-                        imageUrl = p2?.imageUrl ?: "https://picsum.photos/seed/katalog-fashion-12/600/600"
+                        imageUrl = p2?.imageUrl.orEmpty()
                     )
                 ),
                 totalAmount = 2930.0,
@@ -2932,7 +2931,7 @@ class LocalStorageDataService(context: Context) : DataService {
                         quantity = 1,
                         unitPrice = p6?.price ?: 950.0,
                         selectedVariantSummary = "Renk: Uzay Grisi • Garanti: 2 Yıl Türkiye Garantili",
-                        imageUrl = p6?.imageUrl ?: "https://picsum.photos/seed/katalog-tech-51/600/600"
+                        imageUrl = p6?.imageUrl.orEmpty()
                     ),
                     OrderItem(
                         productId = p7?.id ?: "prod-cat3-1",
@@ -2940,7 +2939,7 @@ class LocalStorageDataService(context: Context) : DataService {
                         quantity = 1,
                         unitPrice = p7?.price ?: 2450.0,
                         selectedVariantSummary = "Renk: Gece Siyahı",
-                        imageUrl = p7?.imageUrl ?: "https://picsum.photos/seed/katalog-tech-52/600/600"
+                        imageUrl = p7?.imageUrl.orEmpty()
                     )
                 ),
                 totalAmount = 3400.0,
@@ -2984,7 +2983,7 @@ class LocalStorageDataService(context: Context) : DataService {
                         quantity = 2,
                         unitPrice = p4?.price ?: 640.0,
                         selectedVariantSummary = "Boyut: Büyük Boy • Ton: Doğal Bej",
-                        imageUrl = p4?.imageUrl ?: "https://picsum.photos/seed/katalog-decor-31/600/600"
+                        imageUrl = p4?.imageUrl.orEmpty()
                     ),
                     OrderItem(
                         productId = p5?.id ?: "prod-cat2-3",
@@ -2992,7 +2991,7 @@ class LocalStorageDataService(context: Context) : DataService {
                         quantity = 1,
                         unitPrice = p5?.price ?: 550.0,
                         selectedVariantSummary = "Ton: Mat Beyaz",
-                        imageUrl = p5?.imageUrl ?: "https://picsum.photos/seed/katalog-decor-34/600/600"
+                        imageUrl = p5?.imageUrl.orEmpty()
                     )
                 ),
                 totalAmount = 1830.0,
@@ -3041,7 +3040,7 @@ class LocalStorageDataService(context: Context) : DataService {
                         quantity = 1,
                         unitPrice = p3?.price ?: 1850.0,
                         selectedVariantSummary = "Beden: L • Renk: Zeytin Yeşili",
-                        imageUrl = p3?.imageUrl ?: "https://picsum.photos/seed/katalog-fashion-14/600/600"
+                        imageUrl = p3?.imageUrl.orEmpty()
                     )
                 ),
                 totalAmount = 1850.0,
@@ -3099,7 +3098,7 @@ class LocalStorageDataService(context: Context) : DataService {
                         quantity = 1,
                         unitPrice = p1?.price ?: 890.0,
                         selectedVariantSummary = "Beden: S • Renk: Ekru",
-                        imageUrl = p1?.imageUrl ?: "https://picsum.photos/seed/katalog-fashion-11/600/600"
+                        imageUrl = p1?.imageUrl.orEmpty()
                     )
                 ),
                 totalAmount = 890.0,
@@ -3148,7 +3147,7 @@ class LocalStorageDataService(context: Context) : DataService {
                         quantity = 2,
                         unitPrice = p5?.price ?: 550.0,
                         selectedVariantSummary = "Ton: Toprak",
-                        imageUrl = p5?.imageUrl ?: "https://picsum.photos/seed/katalog-decor-34/600/600"
+                        imageUrl = p5?.imageUrl.orEmpty()
                     )
                 ),
                 totalAmount = 1100.0,
@@ -3190,7 +3189,7 @@ class LocalStorageDataService(context: Context) : DataService {
                         quantity = 1,
                         unitPrice = p7?.price ?: 2450.0,
                         selectedVariantSummary = "Renk: Gümüş",
-                        imageUrl = p7?.imageUrl ?: "https://picsum.photos/seed/katalog-tech-52/600/600"
+                        imageUrl = p7?.imageUrl.orEmpty()
                     )
                 ),
                 totalAmount = 2450.0,
@@ -3234,7 +3233,7 @@ class LocalStorageDataService(context: Context) : DataService {
                         quantity = 1,
                         unitPrice = p3?.price ?: 1850.0,
                         selectedVariantSummary = "Beden: M • Renk: Ekru",
-                        imageUrl = p3?.imageUrl ?: "https://picsum.photos/seed/katalog-fashion-14/600/600"
+                        imageUrl = p3?.imageUrl.orEmpty()
                     ),
                     OrderItem(
                         productId = p2?.id ?: "prod-cat1-1",
@@ -3242,7 +3241,7 @@ class LocalStorageDataService(context: Context) : DataService {
                         quantity = 1,
                         unitPrice = p2?.price ?: 1150.0,
                         selectedVariantSummary = "Beden: M • Renk: Ekru",
-                        imageUrl = p2?.imageUrl ?: "https://picsum.photos/seed/katalog-fashion-12/600/600"
+                        imageUrl = p2?.imageUrl.orEmpty()
                     )
                 ),
                 totalAmount = 3000.0,
@@ -3284,7 +3283,7 @@ class LocalStorageDataService(context: Context) : DataService {
                         quantity = 2,
                         unitPrice = p6?.price ?: 950.0,
                         selectedVariantSummary = "Renk: Gece Siyahı",
-                        imageUrl = p6?.imageUrl ?: "https://picsum.photos/seed/katalog-tech-51/600/600"
+                        imageUrl = p6?.imageUrl.orEmpty()
                     )
                 ),
                 totalAmount = 1900.0,

@@ -275,16 +275,30 @@ fun SettingsDraftScreen(
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                             modifier = Modifier.weight(1f)
                         ) {
-                            AsyncImage(
-                                model = store.logoUri.ifBlank { "https://picsum.photos/seed/vera-logo/300/300" },
-                                contentDescription = "İşletme Logosu",
-                                contentScale = ContentScale.Crop,
+                            val cleanLogo = store.logoUri.takeIf { it.isNotBlank() && !it.contains("picsum.photos") }.orEmpty()
+                            Box(
                                 modifier = Modifier
                                     .size(56.dp)
                                     .clip(RoundedCornerShape(16.dp))
                                     .border(1.5.dp, PrimaryBlue.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
-                                    .background(SurfaceMuted)
-                            )
+                                    .background(SurfaceMuted),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Storefront,
+                                    contentDescription = null,
+                                    tint = PrimaryBlue,
+                                    modifier = Modifier.size(26.dp)
+                                )
+                                if (cleanLogo.isNotBlank()) {
+                                    AsyncImage(
+                                        model = cleanLogo,
+                                        contentDescription = "İşletme Logosu",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                            }
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = store.businessName.ifBlank { "Mağazam" },
@@ -322,28 +336,36 @@ fun SettingsDraftScreen(
                         label = "Adres",
                         value = store.businessAddress.ifBlank { "Adres eklenmedi" }
                     )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    ProfileDetailRow(
+                        icon = Icons.Outlined.Language,
+                        label = "Firma Web Sitesi",
+                        value = store.websiteUrl.ifBlank { "Belirtilmedi (İsteğe bağlı kendi sitenizi ekleyebilirsiniz)" }
+                    )
 
                     // Sosyal Medya Linkleri
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Text(
-                        text = "Sosyal Medya ve Web Linkleri",
-                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                        color = TextSecondary
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
+                    if (store.instagramUrl.isNotBlank() || store.websiteUrl.isNotBlank() || store.facebookUrl.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "Sosyal Medya ve Web Linkleri",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            color = TextSecondary
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        if (store.instagramUrl.isNotBlank()) {
-                            SocialChip(label = "Instagram", value = store.instagramUrl, modifier = Modifier.weight(1f))
-                        }
-                        if (store.websiteUrl.isNotBlank()) {
-                            SocialChip(label = "Web Sitesi", value = store.websiteUrl, modifier = Modifier.weight(1f))
-                        }
-                        if (store.facebookUrl.isNotBlank()) {
-                            SocialChip(label = "Facebook", value = store.facebookUrl, modifier = Modifier.weight(1f))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            if (store.instagramUrl.isNotBlank()) {
+                                SocialChip(label = "Instagram", value = store.instagramUrl, modifier = Modifier.weight(1f))
+                            }
+                            if (store.websiteUrl.isNotBlank()) {
+                                SocialChip(label = "Web Sitesi", value = store.websiteUrl, modifier = Modifier.weight(1f))
+                            }
+                            if (store.facebookUrl.isNotBlank()) {
+                                SocialChip(label = "Facebook", value = store.facebookUrl, modifier = Modifier.weight(1f))
+                            }
                         }
                     }
 

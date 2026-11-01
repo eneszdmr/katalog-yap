@@ -151,9 +151,64 @@ object ShareExportGenerator {
     }
 
     /**
+     * Görseli hedef kutu (boxRect) içerisine en-boy oranını (aspect ratio) KESİNLİKLE bozmadan,
+     * çekip sündürmeden (fit-center) yuvarlatılmış köşeli bir çerçeve içinde çizer.
+     */
+    private fun drawBitmapFitInsideRoundedBox(
+        canvas: Canvas,
+        bmp: Bitmap,
+        boxRect: RectF,
+        cornerRadius: Float = 10f,
+        bgColor: Int = Color.parseColor("#F1F5F9"),
+        borderColor: Int = Color.parseColor("#E2E8F0"),
+        innerPadding: Float = 4f
+    ) {
+        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            color = bgColor
+        }
+        canvas.drawRoundRect(boxRect, cornerRadius, cornerRadius, bgPaint)
+
+        val bw = bmp.width.toFloat().coerceAtLeast(1f)
+        val bh = bmp.height.toFloat().coerceAtLeast(1f)
+        val availW = (boxRect.width() - innerPadding * 2f).coerceAtLeast(1f)
+        val availH = (boxRect.height() - innerPadding * 2f).coerceAtLeast(1f)
+
+        val scale = minOf(availW / bw, availH / bh)
+        val drawW = bw * scale
+        val drawH = bh * scale
+        val cx = boxRect.centerX()
+        val cy = boxRect.centerY()
+        val dstRect = RectF(
+            cx - drawW / 2f,
+            cy - drawH / 2f,
+            cx + drawW / 2f,
+            cy + drawH / 2f
+        )
+
+        val saveCount = canvas.save()
+        val clipPath = android.graphics.Path().apply {
+            addRoundRect(boxRect, cornerRadius, cornerRadius, android.graphics.Path.Direction.CW)
+        }
+        canvas.clipPath(clipPath)
+
+        val bmpPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+        canvas.drawBitmap(bmp, null, dstRect, bmpPaint)
+        canvas.restoreToCount(saveCount)
+
+        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 1f
+            color = borderColor
+        }
+        canvas.drawRoundRect(boxRect, cornerRadius, cornerRadius, borderPaint)
+    }
+
+    /**
      * 2) BROŞÜR (PDF) OLARAK PAYLAŞ:
-     * Kapakta işletme logosu ve katalog adı, her ürün için görsel + ad + fiyat içeren
-     * tek sayfalık veya çok sayfalı PDF üretir.
+     * Kapakta işletme logosu ve katalog adı, her ürün için en-boy oranı korunmuş görsel + ad + fiyat içeren
+     * tek sayfalık veya çok sayfalı, Türkçe karakterleri (ı, İ, ş, Ş, ğ, Ğ, ç, Ç, ö, Ö, ü, Ü) eksiksiz
+     * ve ferah harf aralığıyla (letterSpacing) işleyen yüksek çözünürlüklü PDF üretir.
      */
     suspend fun generateBrochurePdf(
         context: Context,
@@ -168,23 +223,32 @@ object ShareExportGenerator {
             val pdfDocument = PdfDocument()
             val pageWidth = 595 // A4 genişlik (pt)
             val pageHeight = 842 // A4 yükseklik (pt)
+            val renderScale = 2.5f // Yüksek çözünürlüklü (Retina/Baskı) rasterizasyon: Türkçe font ve görsel kalitesi için
+            val bmpWidth = (pageWidth * renderScale).roundToInt()
+            val bmpHeight = (pageHeight * renderScale).roundToInt()
 
-            // İlk 8 ürünün görsellerini önceden yükle
-            val itemsToRender = if (singlePageMode) products.take(6) else products.take(18)
+            val itemsToRender = if (singlePageMode) products.take(6) else products.take(24)
             val bitmapsMap = mutableMapOf<String, Bitmap>()
             itemsToRender.forEach { prod ->
-                val bmp = ImageCompressionUtil.loadBitmapForGemini(context, prod.imageUrl)
+                val bmp = ImageCompressionUtil.loadBitmapForGemini(context, prod.imageUrl, maxDimension = 960)
                 if (bmp != null) {
                     bitmapsMap[prod.id] = bmp
                 }
             }
+            val storeLogoBmp = if (store.logoUri.isNotBlank()) {
+                ImageCompressionUtil.loadBitmapForGemini(context, store.logoUri, maxDimension = 300)
+            } else null
 
-            val primaryBlue = Color.parseColor("#2563EB")
-            val darkSlate = Color.parseColor("#0F172A")
+            val primaryGreen = Color.parseColor("#10B981")
+            val darkAnthracite = Color.parseColor("#0F172A")
+            val headerSlate = Color.parseColor("#1E293B")
             val mutedSlate = Color.parseColor("#64748B")
             val lightBg = Color.parseColor("#F8FAFC")
             val cardBorder = Color.parseColor("#E2E8F0")
             val amberColor = Color.parseColor("#F59E0B")
+
+            val typefaceNormal = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+            val typefaceBold = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
 
             val chunks = if (singlePageMode) {
                 listOf(itemsToRender)
@@ -193,59 +257,84 @@ object ShareExportGenerator {
             }
 
             chunks.forEachIndexed { pageIndex, pageProducts ->
-                val pageInfo = PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageIndex + 1).create()
-                val page = pdfDocument.startPage(pageInfo)
-                val canvas = page.canvas
+                val pageBitmap = Bitmap.createBitmap(bmpWidth, bmpHeight, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(pageBitmap).apply {
+                    scale(renderScale, renderScale)
+                }
 
-                val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+                val paint = Paint(
+                    Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG or Paint.LINEAR_TEXT_FLAG
+                ).apply {
+                    letterSpacing = 0.025f
+                }
 
                 // Sayfa arka planı
+                paint.style = Paint.Style.FILL
                 paint.color = lightBg
                 canvas.drawRect(0f, 0f, pageWidth.toFloat(), pageHeight.toFloat(), paint)
 
-                // Üst Kapak / Başlık Bandı
+                // Üst Kapak / Başlık Bandı (Kurumsal Antrasit & Yeşil Vurgu)
                 val headerHeight = if (pageIndex == 0) 168f else 92f
                 paint.shader = LinearGradient(
                     0f, 0f, pageWidth.toFloat(), headerHeight,
-                    primaryBlue, Color.parseColor("#1D4ED8"),
+                    darkAnthracite, headerSlate,
                     Shader.TileMode.CLAMP
                 )
                 canvas.drawRect(0f, 0f, pageWidth.toFloat(), headerHeight, paint)
                 paint.shader = null
 
-                // İşletme Monogram Logosu (Dairesel)
-                val initials = store.businessName
-                    .trim()
-                    .split(" ")
-                    .filter { it.isNotBlank() }
-                    .take(2)
-                    .joinToString("") { it.first().uppercase() }
-                    .ifBlank { "KY" }
+                // Alt yeşil kurumsal şerit
+                paint.color = primaryGreen
+                canvas.drawRect(0f, headerHeight - 4f, pageWidth.toFloat(), headerHeight, paint)
 
-                paint.color = Color.WHITE
-                canvas.drawCircle(56f, 52f, 26f, paint)
-                paint.color = primaryBlue
-                paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                paint.textSize = 18f
-                paint.textAlign = Paint.Align.CENTER
-                canvas.drawText(initials, 56f, 58f, paint)
+                // İşletme Logosu veya Monogramı (Dairesel)
+                val logoBox = RectF(30f, 26f, 82f, 78f)
+                if (storeLogoBmp != null) {
+                    drawBitmapFitInsideRoundedBox(
+                        canvas = canvas,
+                        bmp = storeLogoBmp,
+                        boxRect = logoBox,
+                        cornerRadius = 26f,
+                        bgColor = Color.WHITE,
+                        borderColor = primaryGreen,
+                        innerPadding = 2f
+                    )
+                } else {
+                    val initials = store.businessName
+                        .trim()
+                        .split(" ")
+                        .filter { it.isNotBlank() }
+                        .take(2)
+                        .joinToString("") { it.first().uppercase(Locale("tr", "TR")) }
+                        .ifBlank { "KY" }
+
+                    paint.color = primaryGreen
+                    canvas.drawCircle(56f, 52f, 26f, paint)
+                    paint.color = Color.WHITE
+                    paint.typeface = typefaceBold
+                    paint.textSize = 17f
+                    paint.textAlign = Paint.Align.CENTER
+                    canvas.drawText(initials, 56f, 58f, paint)
+                }
 
                 // İşletme Adı ve Katalog Başlığı
                 paint.textAlign = Paint.Align.LEFT
-                paint.color = Color.WHITE
-                paint.textSize = 13f
-                paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
-                canvas.drawText(
-                    "${store.businessName}  •  ${store.phoneWhatsapp}",
-                    96f,
-                    42f,
-                    paint
-                )
+                paint.color = Color.parseColor("#CBD5E1")
+                paint.textSize = 12f
+                paint.typeface = typefaceNormal
+                val headerSub = buildString {
+                    append(store.businessName.ifBlank { "Katalog Yap Mağaza" })
+                    if (store.phoneWhatsapp.isNotBlank()) {
+                        append("  •  ${store.phoneWhatsapp}")
+                    }
+                }
+                canvas.drawText(headerSub.take(54), 96f, 42f, paint)
 
-                paint.textSize = if (pageIndex == 0) 22f else 17f
-                paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                paint.color = Color.WHITE
+                paint.textSize = if (pageIndex == 0) 21f else 16.5f
+                paint.typeface = typefaceBold
                 canvas.drawText(
-                    catalogTitle.take(36),
+                    catalogTitle.take(38),
                     96f,
                     70f,
                     paint
@@ -253,22 +342,22 @@ object ShareExportGenerator {
 
                 if (pageIndex == 0) {
                     paint.textSize = 11.5f
-                    paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
-                    paint.color = Color.parseColor("#E0E7FF")
+                    paint.typeface = typefaceNormal
+                    paint.color = Color.parseColor("#E2E8F0")
                     canvas.drawText(
-                        catalogDescription.ifBlank { "Dijital Ürün Kataloğu & Fiyat Broşürü" }.take(68),
+                        catalogDescription.ifBlank { "Dijital Ürün Kataloğu & Fiyat Broşürü" }.take(66),
                         96f,
                         95f,
                         paint
                     )
 
                     // Durum rozeti (Bayi / Fiyat durumu / Ürün sayısı)
-                    paint.color = amberColor
-                    val badgeRect = RectF(96f, 114f, 320f, 140f)
+                    paint.color = if (settings.isDealerShare) amberColor else primaryGreen
+                    val badgeRect = RectF(96f, 114f, 336f, 140f)
                     canvas.drawRoundRect(badgeRect, 12f, 12f, paint)
-                    paint.color = darkSlate
-                    paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                    paint.textSize = 10.5f
+                    paint.color = if (settings.isDealerShare) darkAnthracite else Color.WHITE
+                    paint.typeface = typefaceBold
+                    paint.textSize = 10f
                     val badgeLabel = when {
                         settings.isDealerShare -> "BAYİ ÖZEL KATALOĞU • ${products.size} ÜRÜN"
                         !settings.showPrices -> "ÖZEL KOLEKSİYON • ${products.size} ÜRÜN"
@@ -278,11 +367,11 @@ object ShareExportGenerator {
                 }
 
                 // Ürün Kartları (2 sütun x 3 satır grid)
-                val startY = headerHeight + 22f
+                val startY = headerHeight + 20f
                 val cardW = 258f
-                val cardH = 192f
+                val cardH = 196f
                 val colGap = 19f
-                val rowGap = 16f
+                val rowGap = 14f
                 val marginX = 30f
 
                 pageProducts.forEachIndexed { idx, product ->
@@ -303,70 +392,100 @@ object ShareExportGenerator {
                     canvas.drawRoundRect(cardRect, 14f, 14f, paint)
                     paint.style = Paint.Style.FILL
 
-                    // Ürün Görseli (Sol taraf veya üst bant)
-                    val imgRect = RectF(left + 10f, top + 10f, left + cardW - 10f, top + 114f)
+                    // Ürün Görseli (En-boy oranı korunarak, sündürülmeden çizilir)
+                    val imgRect = RectF(left + 10f, top + 10f, left + cardW - 10f, top + 118f)
                     val bmp = bitmapsMap[product.id]
                     if (bmp != null) {
-                        val srcRect = Rect(0, 0, bmp.width, bmp.height)
-                        canvas.drawBitmap(bmp, srcRect, imgRect, paint)
+                        drawBitmapFitInsideRoundedBox(
+                            canvas = canvas,
+                            bmp = bmp,
+                            boxRect = imgRect,
+                            cornerRadius = 10f,
+                            bgColor = Color.parseColor("#F8FAFC"),
+                            borderColor = Color.parseColor("#E2E8F0"),
+                            innerPadding = 4f
+                        )
                     } else {
-                        paint.color = Color.parseColor("#DBEAFE")
+                        paint.color = Color.parseColor("#ECFDF5")
                         canvas.drawRoundRect(imgRect, 10f, 10f, paint)
-                        paint.color = primaryBlue
-                        paint.textSize = 12f
+                        paint.color = primaryGreen
+                        paint.typeface = typefaceBold
+                        paint.textSize = 11.5f
                         paint.textAlign = Paint.Align.CENTER
-                        canvas.drawText(product.subCategory, imgRect.centerX(), imgRect.centerY() + 4f, paint)
+                        canvas.drawText(
+                            product.subCategory.ifBlank { "Ürün Görseli Yok" }.take(22),
+                            imgRect.centerX(),
+                            imgRect.centerY() + 4f,
+                            paint
+                        )
                         paint.textAlign = Paint.Align.LEFT
                     }
 
                     // Ürün Adı
-                    paint.color = darkSlate
-                    paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                    paint.textSize = 12.5f
+                    paint.color = darkAnthracite
+                    paint.typeface = typefaceBold
+                    paint.textSize = 12f
                     canvas.drawText(
                         product.name.take(26),
                         left + 12f,
-                        top + 136f,
+                        top + 139f,
                         paint
                     )
 
                     // SKU ve Kategori
                     paint.color = mutedSlate
-                    paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
-                    paint.textSize = 10f
+                    paint.typeface = typefaceNormal
+                    paint.textSize = 9.8f
+                    val skuCatText = buildString {
+                        if (product.sku.isNotBlank()) append("SKU: ${product.sku}")
+                        if (product.subCategory.isNotBlank()) {
+                            if (isNotEmpty()) append("  •  ")
+                            append(product.subCategory)
+                        }
+                    }.ifBlank { "Standart Ürün" }
                     canvas.drawText(
-                        "SKU: ${product.sku}  •  ${product.subCategory}",
+                        skuCatText.take(34),
                         left + 12f,
-                        top + 153f,
+                        top + 156f,
                         paint
                     )
 
-                    // Fiyat (veya Fiyatlar Gizli)
-                    paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                    paint.textSize = 14f
-                    paint.color = primaryBlue
-                    val priceText = if (settings.showPrices) {
+                    // Fiyat (veya Fiyatlar Gizli / 0 ise Fiyat Sorunuz)
+                    paint.typeface = typefaceBold
+                    paint.textSize = 13.5f
+                    paint.color = primaryGreen
+                    val priceText = if (settings.showPrices && product.price > 0.0) {
                         val adjusted = settings.calculateAdjustedPrice(product.price)
                         "${adjusted.roundToInt()} ${product.currency}"
                     } else {
                         "Fiyat Sorunuz"
                     }
-                    canvas.drawText(priceText, left + 12f, top + 176f, paint)
+                    canvas.drawText(priceText, left + 12f, top + 180f, paint)
                 }
 
                 // Alt Bilgi (Footer)
                 paint.color = mutedSlate
-                paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
+                paint.typeface = typefaceNormal
                 paint.textSize = 9.5f
                 paint.textAlign = Paint.Align.CENTER
                 canvas.drawText(
-                    "KATALOG YAP ile oluşturuldu  •  Sayfa ${pageIndex + 1} / ${chunks.size}",
+                    "${store.businessName.ifBlank { "KATALOG YAP" }}  •  Sayfa ${pageIndex + 1} / ${chunks.size}",
                     pageWidth / 2f,
-                    pageHeight - 18f,
+                    pageHeight - 16f,
                     paint
                 )
 
+                val pageInfo = PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageIndex + 1).create()
+                val page = pdfDocument.startPage(pageInfo)
+                val pdfPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+                page.canvas.drawBitmap(
+                    pageBitmap,
+                    Rect(0, 0, bmpWidth, bmpHeight),
+                    RectF(0f, 0f, pageWidth.toFloat(), pageHeight.toFloat()),
+                    pdfPaint
+                )
                 pdfDocument.finishPage(page)
+                pageBitmap.recycle()
             }
 
             val dir = File(context.cacheDir, "shared_files").apply {
@@ -388,7 +507,7 @@ object ShareExportGenerator {
 
     /**
      * 3) GÖRSEL OLARAK PAYLAŞ (Canvas İşleme):
-     * Ürün görselini seçilen bilgilerle (başlık, fiyat, SKU, ek not) ve
+     * Ürün görselini en-boy oranını bozmadan seçilen bilgilerle (başlık, fiyat, SKU, ek not) ve
      * 5 konumlu (4 köşe + orta) şeffaf logo filigranı ile Canvas üzerinde oluşturur.
      */
     suspend fun renderProductShareCardBitmap(
@@ -409,17 +528,31 @@ object ShareExportGenerator {
         val sizePx = 1080
         val outBitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(outBitmap)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        val typefaceNormal = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+        val typefaceBold = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG or Paint.LINEAR_TEXT_FLAG).apply {
+            letterSpacing = 0.025f
+        }
 
-        // 1) Arka plan ve Ürün Görseli
-        paint.color = Color.parseColor("#1E293B")
+        // 1) Arka plan ve Ürün Görseli (En-boy oranını koruyarak çizer)
+        paint.color = Color.parseColor("#0F172A")
         canvas.drawRect(0f, 0f, sizePx.toFloat(), sizePx.toFloat(), paint)
 
-        val sourceBmp = ImageCompressionUtil.loadBitmapForGemini(context, imageUrl)
+        val sourceBmp = ImageCompressionUtil.loadBitmapForGemini(context, imageUrl, maxDimension = 1080)
         if (sourceBmp != null) {
-            val srcRect = Rect(0, 0, sourceBmp.width, sourceBmp.height)
-            val dstRect = Rect(0, 0, sizePx, sizePx)
-            canvas.drawBitmap(sourceBmp, srcRect, dstRect, paint)
+            val bw = sourceBmp.width.toFloat().coerceAtLeast(1f)
+            val bh = sourceBmp.height.toFloat().coerceAtLeast(1f)
+            val scale = minOf(sizePx.toFloat() / bw, sizePx.toFloat() / bh)
+            val drawW = bw * scale
+            val drawH = bh * scale
+            val dstRect = RectF(
+                (sizePx - drawW) / 2f,
+                (sizePx - drawH) / 2f,
+                (sizePx + drawW) / 2f,
+                (sizePx + drawH) / 2f
+            )
+            val bmpPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+            canvas.drawBitmap(sourceBmp, null, dstRect, bmpPaint)
         }
 
         // 2) Alt Karartma Gradyanı (Bilgi alanları açıksa okunaklılığı artırır)
@@ -429,7 +562,7 @@ object ShareExportGenerator {
                     0f, sizePx * 0.52f,
                     0f, sizePx.toFloat(),
                     Color.TRANSPARENT,
-                    Color.argb(225, 15, 23, 42),
+                    Color.argb(230, 15, 23, 42),
                     Shader.TileMode.CLAMP
                 )
             }
@@ -447,7 +580,7 @@ object ShareExportGenerator {
             canvas.drawRoundRect(noteRect, 18f, 18f, noteBgPaint)
 
             paint.color = Color.parseColor("#0F172A")
-            paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            paint.typeface = typefaceBold
             paint.textSize = 26f
             paint.textAlign = Paint.Align.LEFT
             canvas.drawText(extraNote.take(44), 80f, cursorY - 18f, paint)
@@ -456,7 +589,7 @@ object ShareExportGenerator {
 
         if (showSku && skuText.isNotBlank()) {
             paint.color = Color.parseColor("#CBD5E1")
-            paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
+            paint.typeface = typefaceNormal
             paint.textSize = 26f
             paint.textAlign = Paint.Align.LEFT
             canvas.drawText("Stok Kodu (SKU): $skuText", 56f, cursorY, paint)
@@ -465,9 +598,9 @@ object ShareExportGenerator {
 
         if (showPrice && priceText.isNotBlank()) {
             val priceBadgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#2563EB")
+                color = Color.parseColor("#10B981")
             }
-            paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            paint.typeface = typefaceBold
             paint.textSize = 44f
             val textWidth = paint.measureText(priceText)
             val badgeRect = RectF(56f, cursorY - 64f, 56f + textWidth + 56f, cursorY + 8f)
@@ -480,8 +613,8 @@ object ShareExportGenerator {
 
         if (showTitle && title.isNotBlank()) {
             paint.color = Color.WHITE
-            paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            paint.textSize = 48f
+            paint.typeface = typefaceBold
+            paint.textSize = 46f
             paint.textAlign = Paint.Align.LEFT
             canvas.drawText(title.take(28), 56f, cursorY, paint)
         }
@@ -512,20 +645,21 @@ object ShareExportGenerator {
 
             // Filigran dairesel ikon
             val circlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.argb(alphaInt, 37, 99, 235)
+                color = Color.argb(alphaInt, 16, 185, 129)
             }
             canvas.drawCircle(left + 42f, top + 42f, 28f, circlePaint)
 
             val initials = storeName.trim().split(" ")
                 .filter { it.isNotBlank() }
                 .take(2)
-                .joinToString("") { it.first().uppercase() }
+                .joinToString("") { it.first().uppercase(Locale("tr", "TR")) }
                 .ifBlank { "KY" }
 
-            val wmTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            val wmTextPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
                 color = Color.argb(alphaInt, 255, 255, 255)
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                typeface = typefaceBold
                 textSize = 22f
+                letterSpacing = 0.025f
                 textAlign = Paint.Align.CENTER
             }
             canvas.drawText(initials, left + 42f, top + 50f, wmTextPaint)

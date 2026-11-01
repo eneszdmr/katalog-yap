@@ -175,6 +175,25 @@ fun formatOrderDateTr(timestamp: Long): String {
 
 object OrderInvoiceHelper {
 
+    fun formatOrderTotalSummary(order: Order): String {
+        if (order.items.isEmpty()) {
+            return "${order.totalAmount.roundToInt()} ${order.currency}"
+        }
+        val grouped = LinkedHashMap<String, Double>()
+        order.items.forEach { item ->
+            val cur = item.currency.trim().ifEmpty { order.currency.ifBlank { "₺" } }
+            grouped[cur] = (grouped[cur] ?: 0.0) + (item.unitPrice * item.quantity)
+        }
+        if (grouped.size <= 1) {
+            val singleCur = grouped.keys.firstOrNull() ?: order.currency
+            val sum = grouped.values.firstOrNull() ?: order.totalAmount
+            return "${sum.roundToInt()} $singleCur"
+        }
+        return grouped.entries.joinToString(" + ") { (cur, sum) ->
+            "${sum.roundToInt()} $cur"
+        }
+    }
+
     /**
      * Müşteriye sipariş durumu ve özetiyle doğrudan WhatsApp (wa.me) mesajı açar.
      */
@@ -194,8 +213,10 @@ object OrderInvoiceHelper {
 
         val itemsSummary = order.items.joinToString("\n") { item ->
             val variantPart = if (item.selectedVariantSummary.isNotBlank()) " (${item.selectedVariantSummary})" else ""
-            "• ${item.quantity}x ${item.productName}$variantPart — ${(item.unitPrice * item.quantity).roundToInt()} ${order.currency}"
+            val itemCur = item.currency.ifBlank { order.currency }
+            "• ${item.quantity}x ${item.productName}$variantPart — ${(item.unitPrice * item.quantity).roundToInt()} $itemCur"
         }
+        val totalSummary = formatOrderTotalSummary(order)
 
         val message = buildString {
             appendLine("Merhaba *${order.customerName}*,")
@@ -204,7 +225,7 @@ object OrderInvoiceHelper {
             appendLine("📌 *Sipariş Durumu:* ${order.status.labelTr}")
             appendLine("📦 *Ürünleriniz:*")
             appendLine(itemsSummary)
-            appendLine("💰 *Toplam Tutar:* ${order.totalAmount.roundToInt()} ${order.currency}")
+            appendLine("💰 *Toplam Tutar:* $totalSummary")
             if (order.customerAddress.isNotBlank()) {
                 appendLine("📍 *Teslimat Adresi:* ${order.customerAddress}")
             }
@@ -221,7 +242,8 @@ object OrderInvoiceHelper {
     }
 
     /**
-     * Sipariş Fişi / Faturasını PDF olarak üretir, kaydeder ve paylaşım ekranını açar.
+     * Sipariş Fişi / Faturasını Türkçe karakterleri (ı, İ, ş, Ş, ğ, Ğ, ç, Ç, ö, Ö, ü, Ü) eksiksiz
+     * ve ferah harf aralığıyla işleyen yüksek çözünürlüklü PDF olarak üretir ve kaydeder.
      */
     suspend fun generateOrderInvoicePdf(
         context: Context,
@@ -232,43 +254,61 @@ object OrderInvoiceHelper {
             val pdfDocument = PdfDocument()
             val pageWidth = 595
             val pageHeight = 842
-            val pageInfo = PdfDocument.PageInfo.Builder(pageWidth, pageHeight, 1).create()
-            val page = pdfDocument.startPage(pageInfo)
-            val canvas: Canvas = page.canvas
+            val renderScale = 2.5f
+            val bmpWidth = (pageWidth * renderScale).roundToInt()
+            val bmpHeight = (pageHeight * renderScale).roundToInt()
 
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+            val pageBitmap = android.graphics.Bitmap.createBitmap(
+                bmpWidth,
+                bmpHeight,
+                android.graphics.Bitmap.Config.ARGB_8888
+            )
+            val canvas = Canvas(pageBitmap).apply {
+                scale(renderScale, renderScale)
+            }
+
+            val typefaceNormal = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+            val typefaceBold = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            val paint = Paint(
+                Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG or Paint.LINEAR_TEXT_FLAG
+            ).apply {
+                letterSpacing = 0.025f
+            }
 
             // Arka plan
             paint.color = AndroidColor.parseColor("#F8FAFC")
             canvas.drawRect(0f, 0f, pageWidth.toFloat(), pageHeight.toFloat(), paint)
 
-            // Üst Lacivert/Mavi Başlık Bandı
-            paint.color = AndroidColor.parseColor("#2563EB")
+            // Üst Kurumsal Antrasit/Yeşil Başlık Bandı
+            paint.color = AndroidColor.parseColor("#0F172A")
             canvas.drawRect(0f, 0f, pageWidth.toFloat(), 115f, paint)
+            paint.color = AndroidColor.parseColor("#10B981")
+            canvas.drawRect(0f, 111f, pageWidth.toFloat(), 115f, paint)
 
             // Mağaza Adı & Fatura Başlığı
             paint.color = AndroidColor.WHITE
-            paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            paint.textSize = 22f
-            canvas.drawText(store.businessName.ifBlank { "KATALOG YAP MAĞAZA" }, 36f, 48f, paint)
+            paint.typeface = typefaceBold
+            paint.textSize = 21f
+            canvas.drawText(store.businessName.ifBlank { "KATALOG YAP MAĞAZA" }.take(30), 36f, 48f, paint)
 
-            paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
-            paint.textSize = 12f
-            paint.color = AndroidColor.parseColor("#DBEAFE")
+            paint.typeface = typefaceNormal
+            paint.textSize = 11.5f
+            paint.color = AndroidColor.parseColor("#A7F3D0")
             canvas.drawText("SİPARİŞ BİLGİ FİŞİ / PROFORMA FATURA", 36f, 72f, paint)
+            paint.color = AndroidColor.parseColor("#CBD5E1")
             canvas.drawText("WhatsApp: ${store.phoneWhatsapp}  •  ${store.city}", 36f, 92f, paint)
 
             // Sağ Üst Sipariş No & Tarih Kutusu
-            paint.color = AndroidColor.parseColor("#1D4ED8")
-            canvas.drawRoundRect(RectF(370f, 22f, 559f, 94f), 12f, 12f, paint)
+            paint.color = AndroidColor.parseColor("#1E293B")
+            canvas.drawRoundRect(RectF(365f, 22f, 559f, 94f), 12f, 12f, paint)
             paint.color = AndroidColor.WHITE
-            paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            paint.textSize = 15f
-            canvas.drawText("Sipariş: ${order.orderNumber}", 386f, 48f, paint)
-            paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
-            paint.textSize = 11f
-            canvas.drawText("Tarih: ${formatOrderDateTr(order.createdAt)}", 386f, 68f, paint)
-            canvas.drawText("Durum: ${order.status.labelTr.uppercase()}", 386f, 84f, paint)
+            paint.typeface = typefaceBold
+            paint.textSize = 14.5f
+            canvas.drawText("Sipariş: ${order.orderNumber}", 380f, 48f, paint)
+            paint.typeface = typefaceNormal
+            paint.textSize = 10.5f
+            canvas.drawText("Tarih: ${formatOrderDateTr(order.createdAt)}", 380f, 68f, paint)
+            canvas.drawText("Durum: ${order.status.labelTr.uppercase(Locale("tr", "TR"))}", 380f, 84f, paint)
 
             // Müşteri Bilgileri Kartı
             var y = 140f
@@ -280,89 +320,93 @@ object OrderInvoiceHelper {
             canvas.drawRoundRect(RectF(36f, y, 559f, y + 118f), 14f, 14f, paint)
             paint.style = Paint.Style.FILL
 
-            paint.color = AndroidColor.parseColor("#2563EB")
-            paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            paint.textSize = 12f
+            paint.color = AndroidColor.parseColor("#10B981")
+            paint.typeface = typefaceBold
+            paint.textSize = 11.5f
             canvas.drawText("MÜŞTERİ VE TESLİMAT BİLGİLERİ", 52f, y + 24f, paint)
 
             paint.color = AndroidColor.parseColor("#0F172A")
-            paint.textSize = 13f
+            paint.textSize = 12.5f
             canvas.drawText("Ad Soyad: ${order.customerName}", 52f, y + 46f, paint)
-            paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
-            paint.textSize = 12f
+            paint.typeface = typefaceNormal
+            paint.textSize = 11.5f
             canvas.drawText("Telefon: ${order.customerPhone}", 320f, y + 46f, paint)
 
             paint.color = AndroidColor.parseColor("#334155")
             val addrText = "Adres: ${order.customerAddress.ifBlank { "Belirtilmedi" }}"
-            canvas.drawText(addrText.take(80), 52f, y + 70f, paint)
+            canvas.drawText(addrText.take(76), 52f, y + 70f, paint)
 
             val noteText = "Sipariş Notu: ${order.customerNote.ifBlank { "-" }}"
             paint.color = AndroidColor.parseColor("#64748B")
-            canvas.drawText(noteText.take(85), 52f, y + 94f, paint)
+            canvas.drawText(noteText.take(80), 52f, y + 94f, paint)
 
             // Ürün Tablosu Başlığı
             y = 280f
             paint.color = AndroidColor.parseColor("#0F172A")
             canvas.drawRoundRect(RectF(36f, y, 559f, y + 32f), 8f, 8f, paint)
             paint.color = AndroidColor.WHITE
-            paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            paint.textSize = 11f
+            paint.typeface = typefaceBold
+            paint.textSize = 10.5f
             canvas.drawText("ÜRÜN ADI & VARYANT", 50f, y + 20f, paint)
-            canvas.drawText("ADET", 355f, y + 20f, paint)
-            canvas.drawText("BİRİM FİYAT", 415f, y + 20f, paint)
-            canvas.drawText("TUTAR", 500f, y + 20f, paint)
+            canvas.drawText("ADET", 350f, y + 20f, paint)
+            canvas.drawText("BİRİM FİYAT", 410f, y + 20f, paint)
+            canvas.drawText("TUTAR", 495f, y + 20f, paint)
 
             y += 38f
             order.items.forEachIndexed { idx, item ->
                 val rowHeight = 46f
+                val itemCur = item.currency.ifBlank { order.currency }
                 paint.color = if (idx % 2 == 0) AndroidColor.WHITE else AndroidColor.parseColor("#F1F5F9")
                 canvas.drawRoundRect(RectF(36f, y, 559f, y + rowHeight), 6f, 6f, paint)
 
                 paint.color = AndroidColor.parseColor("#0F172A")
-                paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                paint.textSize = 12f
-                canvas.drawText(item.productName.take(40), 50f, y + 19f, paint)
+                paint.typeface = typefaceBold
+                paint.textSize = 11.5f
+                canvas.drawText(item.productName.take(38), 50f, y + 19f, paint)
 
-                paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
+                paint.typeface = typefaceNormal
                 paint.color = AndroidColor.parseColor("#64748B")
-                paint.textSize = 10f
+                paint.textSize = 9.8f
                 val variantLine = item.selectedVariantSummary.ifBlank { "Standart Seçenek" }
-                canvas.drawText(variantLine.take(52), 50f, y + 35f, paint)
+                canvas.drawText(variantLine.take(50), 50f, y + 35f, paint)
 
                 paint.color = AndroidColor.parseColor("#0F172A")
-                paint.textSize = 12f
-                canvas.drawText("${item.quantity} adet", 355f, y + 26f, paint)
-                canvas.drawText("${item.unitPrice.roundToInt()} ${order.currency}", 415f, y + 26f, paint)
+                paint.textSize = 11.5f
+                canvas.drawText("${item.quantity} adet", 350f, y + 26f, paint)
+                canvas.drawText("${item.unitPrice.roundToInt()} $itemCur", 410f, y + 26f, paint)
 
-                paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                paint.typeface = typefaceBold
                 val lineTotal = (item.unitPrice * item.quantity).roundToInt()
-                canvas.drawText("$lineTotal ${order.currency}", 495f, y + 26f, paint)
+                canvas.drawText("$lineTotal $itemCur", 492f, y + 26f, paint)
 
                 y += rowHeight + 4f
             }
 
             // Genel Toplam Kutusu
             y += 14f
-            paint.color = AndroidColor.parseColor("#EFF6FF")
-            canvas.drawRoundRect(RectF(310f, y, 559f, y + 54f), 12f, 12f, paint)
+            val totalSummary = formatOrderTotalSummary(order)
+            paint.color = AndroidColor.parseColor("#ECFDF5")
+            canvas.drawRoundRect(RectF(270f, y, 559f, y + 54f), 12f, 12f, paint)
             paint.style = Paint.Style.STROKE
-            paint.color = AndroidColor.parseColor("#BFDBFE")
-            canvas.drawRoundRect(RectF(310f, y, 559f, y + 54f), 12f, 12f, paint)
+            paint.color = AndroidColor.parseColor("#A7F3D0")
+            canvas.drawRoundRect(RectF(270f, y, 559f, y + 54f), 12f, 12f, paint)
             paint.style = Paint.Style.FILL
 
-            paint.color = AndroidColor.parseColor("#1E3A8A")
-            paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            paint.textSize = 13f
-            canvas.drawText("GENEL TOPLAM:", 328f, y + 32f, paint)
+            paint.color = AndroidColor.parseColor("#0F172A")
+            paint.typeface = typefaceBold
+            paint.textSize = 12f
+            canvas.drawText("GENEL TOPLAM:", 286f, y + 32f, paint)
 
-            paint.color = AndroidColor.parseColor("#2563EB")
-            paint.textSize = 18f
-            canvas.drawText("${order.totalAmount.roundToInt()} ${order.currency}", 450f, y + 33f, paint)
+            paint.color = AndroidColor.parseColor("#059669")
+            paint.textSize = if (totalSummary.length > 14) 13.5f else 16.5f
+            paint.textAlign = Paint.Align.RIGHT
+            canvas.drawText(totalSummary, 543f, y + 33f, paint)
+            paint.textAlign = Paint.Align.LEFT
 
             // Alt Bilgi
             paint.color = AndroidColor.parseColor("#94A3B8")
-            paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
-            paint.textSize = 10f
+            paint.typeface = typefaceNormal
+            paint.textSize = 9.5f
             canvas.drawText(
                 "Bu belge KATALOG YAP dijital katalog sistemi üzerinden otomatik oluşturulmuştur.",
                 36f,
@@ -370,7 +414,17 @@ object OrderInvoiceHelper {
                 paint
             )
 
+            val pageInfo = PdfDocument.PageInfo.Builder(pageWidth, pageHeight, 1).create()
+            val page = pdfDocument.startPage(pageInfo)
+            val pdfPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+            page.canvas.drawBitmap(
+                pageBitmap,
+                android.graphics.Rect(0, 0, bmpWidth, bmpHeight),
+                RectF(0f, 0f, pageWidth.toFloat(), pageHeight.toFloat()),
+                pdfPaint
+            )
             pdfDocument.finishPage(page)
+            pageBitmap.recycle()
 
             val exportDir = File(context.cacheDir, "shared_exports").apply { mkdirs() }
             val cleanNo = order.orderNumber.replace("[^A-Za-z0-9]".toRegex(), "").ifBlank { "1001" }
@@ -582,6 +636,7 @@ fun OrderInvoicePreviewDialog(
                             color = PrimaryBlue
                         )
                         order.items.forEach { item ->
+                            val itemCur = item.currency.ifBlank { order.currency }
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -602,7 +657,7 @@ fun OrderInvoicePreviewDialog(
                                     }
                                 }
                                 Text(
-                                    text = "${(item.unitPrice * item.quantity).roundToInt()} ${order.currency}",
+                                    text = "${(item.unitPrice * item.quantity).roundToInt()} $itemCur",
                                     style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
                                     color = TextPrimary
                                 )
@@ -623,7 +678,7 @@ fun OrderInvoicePreviewDialog(
                                 color = TextPrimary
                             )
                             Text(
-                                text = "${order.totalAmount.roundToInt()} ${order.currency}",
+                                text = OrderInvoiceHelper.formatOrderTotalSummary(order),
                                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
                                 color = PrimaryBlue
                             )

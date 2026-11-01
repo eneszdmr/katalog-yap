@@ -139,14 +139,12 @@ fun ProductDetailScreen(
     }
 
     val galleryImages = remember(product) {
-        if (product.galleryUrls.isNotEmpty()) {
-            product.galleryUrls
-        } else {
-            listOf(
-                product.imageUrl,
-                "https://picsum.photos/seed/${product.id}-g2/600/600",
-                "https://picsum.photos/seed/${product.id}-g3/600/600"
-            )
+        val fromGallery = product.galleryUrls.filter { it.isNotBlank() && !it.contains("picsum.photos") }
+        val cleanMain = product.imageUrl.takeIf { it.isNotBlank() && !it.contains("picsum.photos") }
+        when {
+            fromGallery.isNotEmpty() -> fromGallery
+            cleanMain != null -> listOf(cleanMain)
+            else -> listOf("")
         }
     }
 
@@ -226,12 +224,26 @@ fun ProductDetailScreen(
                             .fillMaxSize()
                             .testTag("product_image_pager")
                     ) { page ->
-                        AsyncImage(
-                            model = galleryImages[page],
-                            contentDescription = "${product.name} - Görsel ${page + 1}",
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
+                        val imgUrl = galleryImages[page]
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Inventory2,
+                                contentDescription = null,
+                                tint = TextSecondary.copy(alpha = 0.4f),
+                                modifier = Modifier.size(64.dp)
+                            )
+                            if (imgUrl.isNotBlank()) {
+                                AsyncImage(
+                                    model = imgUrl,
+                                    contentDescription = "${product.name} - Görsel ${page + 1}",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
+                        }
                     }
 
                     // Sağ Üst Sayaç Rozeti ("1 / 4")
@@ -306,7 +318,11 @@ fun ProductDetailScreen(
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Text(
-                            text = "${product.price.toInt()} ${product.currency}",
+                            text = if (product.price > 0.0) {
+                                "${product.price.toInt()} ${product.currency}"
+                            } else {
+                                "Fiyat Belirtilmedi"
+                            },
                             style = MaterialTheme.typography.headlineLarge.copy(fontWeight = FontWeight.Bold),
                             color = PrimaryBlue
                         )

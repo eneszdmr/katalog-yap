@@ -175,12 +175,12 @@ object InventoryCsvExporter {
 
     fun defaultSampleCsv(): String = """
 Urun_Adi;Satis_Fiyati;Urun_Kodu_SKU;Stok_Adedi;Kategori_Adi;Gorsel_Linki
-Kaşmir Dokulu Triko Kazak;1290;VR-KSM-501;24;Üst Giyim;https://picsum.photos/seed/csv-kasmir-1/600/600
-Doğal Mermer Kahve Tepsisi;740;EV-MRM-502;4;Sofra & Mutfak;https://picsum.photos/seed/csv-mermer-2/600/600
-Manyetik Kablosuz Araç Şarjı;1150;TK-MAG-503;18;Şarj & Güç;https://picsum.photos/seed/csv-magsafe-3/600/600
-Biberiye Özlü Saç Toniği;420;KZ-BBR-504;0;Saç Bakımı;https://picsum.photos/seed/csv-biberiye-4/600/600
-Keten Kruvaze Yazlık Ceket;1680;VR-KTN-505;3;Dış Giyim;https://picsum.photos/seed/csv-keten-5/600/600
-El Yapımı Soya Mumu Seti;560;EV-SOY-506;32;Aydınlatma & Koku;https://picsum.photos/seed/csv-soya-6/600/600
+Kaşmir Dokulu Triko Kazak;;VR-KSM-501;24;Üst Giyim;
+Doğal Mermer Kahve Tepsisi;;EV-MRM-502;4;Sofra & Mutfak;
+Manyetik Kablosuz Araç Şarjı;;TK-MAG-503;18;Şarj & Güç;
+Biberiye Özlü Saç Toniği;;KZ-BBR-504;0;Saç Bakımı;
+Keten Kruvaze Yazlık Ceket;;VR-KTN-505;3;Dış Giyim;
+El Yapımı Soya Mumu Seti;;EV-SOY-506;32;Aydınlatma & Koku;
     """.trimIndent()
 }
 
@@ -293,7 +293,7 @@ fun BulkCsvImportModal(
             val price = rawPrice
                 .replace("[^0-9.,]".toRegex(), "")
                 .replace(",", ".")
-                .toDoubleOrNull() ?: 450.0
+                .toDoubleOrNull() ?: 0.0
 
             val sku = row.getOrNull(skuColIdx)?.trim().orEmpty().ifBlank { "CSV-${100 + idx}" }
             val stock = row.getOrNull(stockColIdx)
@@ -301,7 +301,7 @@ fun BulkCsvImportModal(
                 ?.toIntOrNull() ?: 15
             val category = row.getOrNull(categoryColIdx)?.trim().orEmpty().ifBlank { "Genel" }
             val imageUrl = row.getOrNull(imageUrlColIdx)?.trim().orEmpty()
-                .ifBlank { "https://picsum.photos/seed/csv-prev-$idx/600/600" }
+                .takeIf { !it.contains("picsum.photos") }.orEmpty()
 
             val status = when {
                 stock <= 0 -> StockStatus.OUT_OF_STOCK

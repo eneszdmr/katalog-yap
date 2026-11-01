@@ -980,7 +980,10 @@ class MariaDbStorageEngine(private val appContext: Context) {
                                 city = rs.getString("city").orEmpty(),
                                 businessAddress = rs.getString("business_address").orEmpty(),
                                 instagramUrl = rs.getString("instagram_url").orEmpty(),
-                                websiteUrl = rs.getString("website_url").orEmpty().ifBlank { "https://constantinopolishotel.store" },
+                                websiteUrl = rs.getString("website_url").orEmpty().takeIf {
+                                    !it.equals("https://constantinopolishotel.store", ignoreCase = true) &&
+                                        !it.equals("constantinopolishotel.store", ignoreCase = true)
+                                }.orEmpty(),
                                 facebookUrl = rs.getString("facebook_url").orEmpty(),
                                 currencyCode = rs.getString("currency_code").orEmpty().ifBlank { "TRY" },
                                 currencySymbol = rs.getString("currency_symbol").orEmpty().ifBlank { "₺" },

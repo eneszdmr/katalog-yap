@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.outlined.DragIndicator
+import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
@@ -101,6 +102,15 @@ fun ProductPriceDisplay(
     currency: String,
     modifier: Modifier = Modifier
 ) {
+    if (price <= 0.0) {
+        Text(
+            text = "Fiyat Belirtilmedi",
+            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+            color = TextMuted,
+            modifier = modifier
+        )
+        return
+    }
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically,
@@ -187,14 +197,24 @@ fun ProductGridCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(1f)
-                    .background(SurfaceMuted)
+                    .background(SurfaceMuted),
+                contentAlignment = Alignment.Center
             ) {
-                AsyncImage(
-                    model = product.imageUrl,
-                    contentDescription = product.name,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
+                Icon(
+                    imageVector = Icons.Outlined.Inventory2,
+                    contentDescription = null,
+                    tint = TextMuted.copy(alpha = 0.45f),
+                    modifier = Modifier.size(38.dp)
                 )
+                val cleanUrl = product.imageUrl.takeIf { !it.contains("picsum.photos") }.orEmpty()
+                if (cleanUrl.isNotBlank()) {
+                    AsyncImage(
+                        model = cleanUrl,
+                        contentDescription = product.name,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
 
                 // Sol Üst: Çoklu Seçim Kutusu veya Stok Rozeti
                 Box(
@@ -355,15 +375,29 @@ fun ProductListRowCard(
                 Spacer(modifier = Modifier.width(10.dp))
             }
 
-            AsyncImage(
-                model = product.imageUrl,
-                contentDescription = product.name,
-                contentScale = ContentScale.Crop,
+            Box(
                 modifier = Modifier
                     .size(72.dp)
                     .clip(ButtonRoundedXl)
-                    .background(SurfaceMuted)
-            )
+                    .background(SurfaceMuted),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Inventory2,
+                    contentDescription = null,
+                    tint = TextMuted.copy(alpha = 0.45f),
+                    modifier = Modifier.size(28.dp)
+                )
+                val cleanUrl = product.imageUrl.takeIf { !it.contains("picsum.photos") }.orEmpty()
+                if (cleanUrl.isNotBlank()) {
+                    AsyncImage(
+                        model = cleanUrl,
+                        contentDescription = product.name,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+            }
 
             Spacer(modifier = Modifier.width(12.dp))
 
@@ -484,14 +518,24 @@ fun ProductLargeCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(1.45f)
-                    .background(SurfaceMuted)
+                    .background(SurfaceMuted),
+                contentAlignment = Alignment.Center
             ) {
-                AsyncImage(
-                    model = product.imageUrl,
-                    contentDescription = product.name,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
+                Icon(
+                    imageVector = Icons.Outlined.Inventory2,
+                    contentDescription = null,
+                    tint = TextMuted.copy(alpha = 0.45f),
+                    modifier = Modifier.size(44.dp)
                 )
+                val cleanUrl = product.imageUrl.takeIf { !it.contains("picsum.photos") }.orEmpty()
+                if (cleanUrl.isNotBlank()) {
+                    AsyncImage(
+                        model = cleanUrl,
+                        contentDescription = product.name,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
 
                 Box(
                     modifier = Modifier

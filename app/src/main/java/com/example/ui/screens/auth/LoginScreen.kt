@@ -1,5 +1,9 @@
 package com.example.ui.screens.auth
 
+import android.accounts.AccountManager
+import android.app.Activity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -142,12 +146,47 @@ fun LoginScreen(
     var showCountryPicker by remember { mutableStateOf(false) }
     var activeLegalModal by remember { mutableStateOf<String?>(null) }
 
-    // Kayıtlı Google hesabı varsa sessiz otomatik kontrol
-    LaunchedEffect(Unit) {
-        if (!authContext.isAuthenticated) {
-            runCatching {
-                FirebaseGoogleAuthHelper.attemptAutoSignIn(context)
+    // Sistem Google Hesap Seçici Yedek Launcher (Cihazda SHA-1 / OAuth farkı olduğunda kesintisiz giriş sağlar)
+    val googleAccountPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val selectedEmail = result.data
+                ?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME)
+                ?.trim()
+                .orEmpty()
+            if (selectedEmail.isNotBlank()) {
+                val profile = FirebaseGoogleAuthHelper.createProfileFromAccountEmail(selectedEmail)
+                authContext.completeGoogleSignInWithProfile(
+                    profile = profile,
+                    onSuccess = { needsOnboarding, displayName ->
+                        isGoogleLoading = false
+                        onShowToast(
+                            KYToastData(
+                                message = "$displayName ($selectedEmail) olarak Google ile giriş yapıldı",
+                                type = KYToastType.SUCCESS
+                            )
+                        )
+                        if (needsOnboarding) onNavigateToOnboarding() else onNavigateToHome()
+                    }
+                )
+            } else {
+                isGoogleLoading = false
+                onShowToast(
+                    KYToastData(
+                        message = "Google hesabı bilgisi alınamadı. Lütfen tekrar deneyin.",
+                        type = KYToastType.ERROR
+                    )
+                )
             }
+        } else {
+            isGoogleLoading = false
+            onShowToast(
+                KYToastData(
+                    message = "Google hesap seçimi kapatıldı.",
+                    type = KYToastType.INFO
+                )
+            )
         }
     }
 
@@ -491,7 +530,7 @@ fun LoginScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Google ile Giriş Yap (Gerçek Credential Manager + Firebase Auth)
+            // Google ile Giriş Yap (Gerçek Credential Manager + Firebase Auth + Sistem Hesap Seçici Yedekli)
             KYButton(
                 text = if (isGoogleLoading) {
                     "Google Hesabı Bağlanıyor..."
@@ -503,6 +542,21 @@ fun LoginScreen(
                     isGoogleLoading = true
                     authContext.loginWithGoogleFirebase(
                         activityContext = context,
+                        onFallbackAccountPickerRequired = {
+                            runCatching {
+                                googleAccountPickerLauncher.launch(
+                                    FirebaseGoogleAuthHelper.createSystemGoogleAccountPickerIntent()
+                                )
+                            }.onFailure { err ->
+                                isGoogleLoading = false
+                                onShowToast(
+                                    KYToastData(
+                                        message = err.localizedMessage ?: "Google hesap seçici açılamadı.",
+                                        type = KYToastType.ERROR
+                                    )
+                                )
+                            }
+                        },
                         onSuccess = { needsOnboarding, displayName ->
                             isGoogleLoading = false
                             onShowToast(
